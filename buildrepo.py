@@ -4,6 +4,8 @@ import logging
 import re
 import json
 import gettext
+import os
+import gzip
 from os import getuid, mkdir, devnull, chdir, listdir, remove
 from os.path import curdir, abspath, exists, basename, isdir
 from shutil import rmtree, copyfile
@@ -500,7 +502,7 @@ class Debhelper:
         try:
             logstream = open(log_file, mode='w')
         except OSError as e:
-            exit_with_error(_('Error opening logfile: %s') % r)
+            exit_with_error(_('Error opening logfile: %s') % e)
         logstream.write('\n\nCommand: %s' % command)
         proc = Popen(command, stdout=logstream, stderr=logstream, universal_newlines=True, shell=True)
         proc.communicate()
@@ -524,12 +526,13 @@ class Debhelper:
         Debhelper.copy_files(tmpdirpath, repopath, debs)
 
     @staticmethod
-    def find_packages_files(mount_point):
-        command = 'find %s -name Packages' % mount_point
-        try:
-            return Debhelper.run_command_with_output(command)
-        except CalledProcessError:
-            exit_with_error(_('Error finding package list'))
+    def find_packages_files(mount_point, package_file='Packages.gz'):
+        distrs_path = os.path.join(mount_point, 'dists')
+        result = []
+        for root, dirs, files in os.walk(distrs_path):
+            if package_file in files:
+                result.append(os.path.join(root, package_file))
+        return result
 
     @staticmethod
     def get_binary_depends(repodirpath, deb_package):
@@ -1152,14 +1155,15 @@ class PackageCacheMaker:
         self.__cache_type = cache_type
 
     def run(self):
-        packages_path = Debhelper.find_packages_files(self.__mount_point).split(END_OF_LINE)
+        packages_path = Debhelper.find_packages_files(self.__mount_point)
         cache_file_path = '%s/%s.cache' % (self.__conf.cachedirpath, self.__name)
         result = {DIRECTIVE_CACHE_NAME: self.__name,
                   DIRECTIVE_CACHE_TYPE: self.__cache_type}
         packages = []
         for path in packages_path:
-            fpath = open(path, mode='r')
-            lines = [f.rstrip(END_OF_LINE) for f in fpath.readlines() if f.endswith(END_OF_LINE)]
+            with gzip.open(path, mode='rb') as gfile:
+                content = gfile.read().decode('utf-8', 'ignore')
+                lines = content.split(END_OF_LINE)
             version = str()
             package_name = str()
             version = str()
@@ -1182,7 +1186,6 @@ class PackageCacheMaker:
                         DIRECTIVE_CACHE_PACKAGES_PACKAGE_PROVIDES: provides
                     }
                     packages.append(data)
-            fpath.close()
         result[DIRECTIVE_CACHE_PACKAGES] = packages
         with open(cache_file_path, mode='w') as out:
             out.write(json.dumps(result, sort_keys=True, indent=4))
