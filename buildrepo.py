@@ -527,6 +527,8 @@ class Debhelper:
 
     @staticmethod
     def find_packages_files(mount_point, package_file='Packages.gz'):
+        if not os.path.exists(mount_point):
+            exit_with_error(_('Path %s does not exists'), mount_point)
         distrs_path = os.path.join(mount_point, 'dists')
         result = []
         for root, dirs, files in os.walk(distrs_path):
