@@ -907,7 +907,7 @@ class RepoMaker:
         self.__parse_white_list()
 
     def __load_available_packages(self):
-        logging.info(_('Loading package of built package ...'))
+        logging.info(_('Loading info for builded packages ...'))
         maker = PackageCacheMaker(self.__conf.root,
                                   self.__conf.repodirpath,
                                   'target',
@@ -922,7 +922,7 @@ class RepoMaker:
 
     def __load_cache(self):
         files = [f for f in listdir(self.__conf.cachedirpath) if f.endswith('.cache')]
-        if len(files) == 0:
+        if len(files) <= 1:
             exit_with_error(_('No one cache is loaded'))
         for f in files:
             path = '%s/%s' % (self.__conf.cachedirpath, f)
