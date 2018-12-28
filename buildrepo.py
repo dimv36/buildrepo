@@ -6,6 +6,7 @@ import json
 import gettext
 import os
 import gzip
+import apt
 from os import getuid, mkdir, devnull, chdir, listdir, remove
 from os.path import curdir, abspath, exists, basename, isdir
 from shutil import rmtree, copyfile
@@ -668,6 +669,7 @@ class Configuration:
         self.debsdirpath = '%s/debs' % root
         self.cachedirpath = '%s/cache' % root
         self.frepodirpath = '%s/frepo' % root
+        self.frepodevdirpath = '%s/frepodev' % root
         self.packageslistpath = '%s/packageslist.txt' % self.datadirpath
 
     @staticmethod
@@ -708,7 +710,7 @@ class RepoInitializer:
         for _directory in [self.__conf.srcdirpath, self.__conf.datadirpath,
                            self.__conf.repodirpath, self.__conf.logdirpath,
                            self.__conf.debsdirpath, self.__conf.cachedirpath,
-                           self.__conf.frepodirpath]:
+                           self.__conf.frepodirpath, self.__conf.frepodevdirpath]:
             make_dir(_directory)
 
     def __init_packages_list(self):
@@ -892,10 +894,133 @@ class Builder:
 
 
 class PackageType:
-    PACKAGE_FROM_TARGET = 0
-    PACKAGE_FROM_MAIN = 1
-    PACKAGE_FROM_NON_MAIN = 2
-    PACKAGE_NOT_FOUND = 3
+    (PACKAGE_FROM_OS_REPO,
+     PACKAGE_FROM_OS_DEV_REPO,
+     PACKAGE_FROM_TARGET_REPO,
+     PACKAGE_FROM_TARGET_DEV_REPO,
+     PACKAGE_BUILDED,
+     PACKAGE_NOT_FOUND) = range(0, 6)
+
+
+class RepoMaker2:
+    class DependencyFinder:
+        def __init__(self, package, caches, target=True):
+            self.deps = list()
+            aptcache = apt.Cache()
+            self.__caches = caches
+            self.__package = aptcache.get(package)
+            if self.__package is None:
+                exit_with_error(_('Package %s does not exists') % package)
+            self.deps.append((self.__package.name, self.__package.versions[0],
+                              self.__get_package_repository(self.__package)))
+            self.__deps_recurse(self.deps, self.__package)
+
+        def __get_package_repository(self, package):
+            package_name, package_ver = package.name, package.versions[0].version
+            for cache in self.__caches:
+                cache_name = cache[DIRECTIVE_CACHE_NAME]
+                for p in cache[DIRECTIVE_CACHE_PACKAGES]:
+                    if p['name'] == package_name and p['version'] == package_ver:
+                        logging.debug(_('Package %s(%s) founded in %s repo') % (package_name,
+                                                                                package_ver, cache_name))
+                        return cache[DIRECTIVE_CACHE_TYPE]
+
+        def __deps_recurse(self, s, p):
+            deps = p.candidate.get_dependencies('Depends')
+            pre_deps = p.candidate.get_dependencies('PreDepends')
+            all_deps = deps + pre_deps
+            for i in all_deps:
+                dp = i.target_versions
+                if len(dp) > 0:
+                    package = dp[0].package
+                    package_ver = package.versions[0].version
+                    item = (p.name, package, package_ver, self.__get_package_repository(package))
+                    if item not in s:
+                        s.append(item)
+                        self.__deps_recurse(s, package)
+
+    def __init__(self, repodirpath, white_list_path):
+        if not exists(white_list_path):
+            exit_with_error(_('File \'%s\' does not exist') % white_list_path)
+        self.__conf = Configuration(repodirpath)
+        self.__white_list = white_list_path
+        self.__packages = {}
+        self.__caches = []
+        self.__build_cache_of_builded_packages()
+        self.__load_caches()
+        self.__parse_white_list()
+
+    def __parse_white_list(self):
+        i = 1
+        last_section = None
+        for line in open(self.__white_list, mode='r').readlines():
+            i += 1
+            if line.startswith('#') or line == END_OF_LINE:
+                continue
+            line = line.rstrip('\n')
+            if line.startswith('[') and line.endswith(']'):
+                last_section = line[1:-1]
+                self.__packages[last_section] = []
+            else:
+                if last_section is None:
+                    exit_with_error(_('Got package at line %d, '
+                                      'but section expected') % i)
+                packages = self.__packages.get(last_section)
+                if line in packages:
+                    logging.warn(_('Package %s already in %s, skipped'), line, last_section)
+                    continue
+                packages.append(line)
+                self.__packages[last_section] = packages
+        if 'target' not in self.__packages:
+            exit_with_error(_('White list for target repository is empty'))
+        # Проверка на пересечение
+        all_pkgs = set()
+        for section, packages in self.__packages.items():
+            if not len(all_pkgs):
+                all_pkgs = set(packages)
+                continue
+            if (all_pkgs & set(packages)):
+                exit_with_error(_('Intersection is found in lists'))
+
+    def __build_cache_of_builded_packages(self):
+        logging.info(_('Build cache for builded packages ...'))
+        maker = PackageCacheMaker(self.__conf.root,
+                                  self.__conf.repodirpath,
+                                  'builded',
+                                  PackageType.PACKAGE_BUILDED)
+        maker.run(is_builded=True)
+
+    def __load_caches(self):
+        files = [f for f in listdir(self.__conf.cachedirpath) if f.endswith('.cache')]
+        if len(files) <= 1:
+            exit_with_error(_('No one cache is created'))
+        for f in files:
+            path = '%s/%s' % (self.__conf.cachedirpath, f)
+            with open(path, mode='r') as json_data:
+                self.__caches.append(json.load(json_data))
+        os_repo_exists = any([cache[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_FROM_OS_REPO
+                             for cache in self.__caches])
+        if not os_repo_exists:
+            exit_with_error(_('Cache for OS repo is needed'))
+        os_dev_repo_exists = any([cache[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_FROM_OS_DEV_REPO
+                                 for cache in self.__caches])
+        if not os_dev_repo_exists:
+            exit_with_error(_('Cache for OS dev repo is needed'))
+
+    def __get_depends_for_package(self, package, target=False):
+        depfinder = self.DependencyFinder(package, self.__caches, target)
+        return depfinder.deps
+
+    def run(self):
+        # Подготовка к созданию репозитория - очистка директорий
+        for directory in [self.__conf.frepodirpath, self.__conf.frepodevdirpath]:
+            logging.debug(_('Clearing %s') % directory)
+            for file in listdir(directory):
+                remove('%s/%s' % (directory, file))
+        for required in self.__packages['target']:
+            deps = self.__get_depends_for_package(required, True)
+            for dep in deps:
+                print(dep)
 
 
 class RepoMaker:
@@ -1156,16 +1281,23 @@ class PackageCacheMaker:
         self.__mount_point = mount_point
         self.__cache_type = cache_type
 
-    def run(self):
-        packages_path = Debhelper.find_packages_files(self.__mount_point)
+    def run(self, is_builded=False):
+        if not is_builded:
+            packages_path = Debhelper.find_packages_files(self.__mount_point)
+        else:
+            packages_path = ['%s/Packages' % self.__mount_point]
         cache_file_path = '%s/%s.cache' % (self.__conf.cachedirpath, self.__name)
         result = {DIRECTIVE_CACHE_NAME: self.__name,
                   DIRECTIVE_CACHE_TYPE: self.__cache_type}
         packages = []
         for path in packages_path:
-            with gzip.open(path, mode='rb') as gfile:
-                content = gfile.read().decode('utf-8', 'ignore')
-                lines = content.split(END_OF_LINE)
+            try:
+                with gzip.open(path, mode='rb') as gfile:
+                    content = gfile.read().decode('utf-8', 'ignore')
+                    lines = content.split(END_OF_LINE)
+            except OSError:
+                with open(path, mode='r') as fp:
+                    lines = [line.rstrip('\n') for line in fp.readlines()]
             version = str()
             package_name = str()
             version = str()
@@ -1252,10 +1384,10 @@ if __name__ == '__main__':
             builder = Builder(root, abspath(args.source_list), args.clean, args.jobs)
             builder.run()
         elif args.command == COMMAND_MAKE_REPO:
-            repomaker = RepoMaker(root, abspath(args.white_list))
+            repomaker = RepoMaker2(root, abspath(args.white_list))
             repomaker.run()
         elif args.command == COMMAND_MAKE_PACKAGE_CACHE:
-            cache_type = PackageType.PACKAGE_FROM_MAIN if args.primary else PackageType.PACKAGE_FROM_NON_MAIN
+            cache_type = PackageType.PACKAGE_FROM_OS_REPO if args.primary else PackageType.PACKAGE_FROM_OS_DEV_REPO
             cachemaker = PackageCacheMaker(root, abspath(args.mount_path), args.name, cache_type)
             cachemaker.run()
         else:
