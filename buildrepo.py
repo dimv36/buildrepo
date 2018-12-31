@@ -13,7 +13,6 @@ from shutil import rmtree, copyfile
 from argparse import ArgumentParser
 from subprocess import check_call, check_output, CalledProcessError, Popen
 from tempfile import mkdtemp
-from copy import deepcopy
 
 DEFAULT_REPO_DIR = abspath('%s/../build' % curdir)
 REPO_FILE_NAME = '/etc/apt/sources.list.d/build-repo.list'
@@ -911,7 +910,7 @@ class RepoMaker2:
             self.__package = aptcache.get(package)
             if self.__package is None:
                 exit_with_error(_('Package %s does not exists') % package)
-            self.deps.append((self.__package.name, self.__package.versions[0],
+            self.deps.append((self.__package.name, self.__package,
                               self.__get_package_repository(self.__package)))
             self.__deps_recurse(self.deps, self.__package)
 
@@ -933,8 +932,7 @@ class RepoMaker2:
                 dp = i.target_versions
                 if len(dp) > 0:
                     package = dp[0].package
-                    package_ver = package.versions[0].version
-                    item = (p.name, package, package_ver, self.__get_package_repository(package))
+                    item = (p.name, package, self.__get_package_repository(package))
                     if item not in s:
                         s.append(item)
                         self.__deps_recurse(s, package)
@@ -1017,253 +1015,78 @@ class RepoMaker2:
             logging.debug(_('Clearing %s') % directory)
             for file in listdir(directory):
                 remove('%s/%s' % (directory, file))
+        logging.info(_('Processing target repository ...'))
+        # Анализ пакетов основного репозитория
+        target_builded_deps = set()
         for required in self.__packages['target']:
+            logging.info(_('Processing \'%s\' ...') % required)
             deps = self.__get_depends_for_package(required, True)
-            for dep in deps:
-                print(dep)
-
-
-class RepoMaker:
-    def __init__(self, repodirpath, white_list_path):
-        if not exists(white_list_path):
-            exit_with_error(_('File \'%s\' does not exist') % white_list_path)
-        self.__conf = Configuration(repodirpath)
-        self.__required_packages = []
-        self.__available_packages = []
-        self.__cache = []
-        self.__white_list = white_list_path
-        self.__load_available_packages()
-        self.__load_cache()
-        self.__parse_white_list()
-
-    def __load_available_packages(self):
-        logging.info(_('Loading info for builded packages ...'))
-        maker = PackageCacheMaker(self.__conf.root,
-                                  self.__conf.repodirpath,
-                                  'target',
-                                  PackageType.PACKAGE_FROM_TARGET)
-        self.__available_packages = maker.run()
-
-    def __parse_white_list(self):
-        for line in open(self.__white_list, mode='r').readlines():
-            if line.startswith('#') or line == END_OF_LINE:
-                continue
-            self.__required_packages.append(line.rstrip(END_OF_LINE))
-
-    def __load_cache(self):
-        files = [f for f in listdir(self.__conf.cachedirpath) if f.endswith('.cache')]
-        if len(files) <= 1:
-            exit_with_error(_('No one cache is loaded'))
-        for f in files:
-            path = '%s/%s' % (self.__conf.cachedirpath, f)
-            with open(path, mode='r') as json_data:
-                self.__cache.append(json.load(json_data))
-
-    def __get_package_destination(self, dep):
-        def find_package_name(_package, _packages):
-            for p in _packages:
-                if p == _package or (_packages[p] is not None and _package in _packages[p]):
-                    return p
-            return None
-
-        def get_package_data(_package, _packages):
-            for p in _packages:
-                if p[DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME] == _package:
-                    return p
-            return None
-
-        def find_in_repo(dep, packages, status_if_found, cache_name):
-            package_names = {p[DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME]: p[DIRECTIVE_CACHE_PACKAGES_PACKAGE_PROVIDES]
-                             for p in packages}
-            # Отдельно обрабатываем альтернативные зависимости
-            if isinstance(dep, AlternativeRelationship):
-                statuses = []
-                for r in dep.relationships:
-                    current_status = {'package': r.name,
-                                      'status': PackageType.PACKAGE_NOT_FOUND,
-                                      'dependency': r}
-                    provider_package = find_package_name(r.name, package_names)
-                    if provider_package:
-                        logging.debug(_('Alternative dependency \'%s\' is found in cache \'%s\'') %
-                                       (r.name, cache_name))
-                        package = get_package_data(provider_package, packages)
-                        current_status['package'] = package[DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME]
-                        if isinstance(r, VersionedRelationship):
-                            if Debhelper.compare_versions(package[DIRECTIVE_CACHE_PACKAGES_PACKAGE_VERSION],
-                                                          r.operator, r.version):
-                                current_status['status'] = status_if_found
-                        elif isinstance(r, Relationship):
-                            current_status['status'] = status_if_found
-                    else:
-                        logging.debug(_('Alternative dependency \'%s\' is not found in cache \'%s\'') % (
-                            r.name, cache_name))
-                    statuses.append(current_status)
-                # Анализируем полученные статусы
-                best = None
-                for s in statuses:
-                    if statuses.index(s) == 0:
-                        best = s
-                    else:
-                        if best['status'] >= s['status']:
-                            best = s
-                best['package'] = Debhelper.get_provider_package_name(best['dependency'].name)
-                return best
-            else:
-                provider_package = find_package_name(dep.name, package_names)
-                if provider_package:
-                    packages = [p for p in packages if p[DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME] == dep.name]
-                    if len(packages) == 0:
-                        packages = Debhelper.get_provider_package_name(dep.name)
-                    if len(packages) > 1:
-                        packages = sorted(packages, reverse=True)
-                    package = packages[0]
-                    # В зависимости от типа зависимости определяем наличие пакета
-                    if isinstance(dep, VersionedRelationship):
-                        # Зависимость с указанием версии -- выполняем сравнение
-                        if Debhelper.compare_versions(package[DIRECTIVE_CACHE_PACKAGES_PACKAGE_VERSION],
-                                                      dep.operator,
-                                                      dep.version):
-                            return {'package': dep.name,
-                                    'status': status_if_found,
-                                    'dependency': dep}
-                        else:
-                            return {'package': dep.name,
-                                    'status': PackageType.PACKAGE_NOT_FOUND,
-                                    'dependency': dep}
-                    elif isinstance(dep, Relationship):
-                        # Простая зависимость -- указано лишь её название
-                        return {'package': dep.name,
-                                'status': status_if_found,
-                                'dependency': dep}
-                return {'package': dep,
-                        'status': PackageType.PACKAGE_NOT_FOUND,
-                        'dependency': dep}
-
-        def print_status(dep_name, status):
-            _from = str()
-            if status == PackageType.PACKAGE_FROM_MAIN:
-                _from = _('in main cache')
-            elif status == PackageType.PACKAGE_FROM_TARGET:
-                _from = _('in package of built package list')
-            elif status == PackageType.PACKAGE_FROM_NON_MAIN:
-                _from = _('in devel package list')
-            elif status == PackageType.PACKAGE_NOT_FOUND:
-                _from = _('not found')
-            logging.debug(_('Package \'%s\' %s') % (dep_name, _from))
-
-        # Ищем в основных кэшах
-        main_caches = [c for c in self.__cache if c[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_FROM_MAIN]
-        non_main_caches = [c for c in self.__cache if c[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_FROM_NON_MAIN]
-        for c in main_caches:
-            result = find_in_repo(dep,
-                                  c[DIRECTIVE_CACHE_PACKAGES],
-                                  PackageType.PACKAGE_FROM_MAIN,
-                                  c[DIRECTIVE_CACHE_NAME])
-        # Не нашли? Смотрим в собранных пакетах
-        if result['status'] == PackageType.PACKAGE_NOT_FOUND:
-            result = find_in_repo(dep,
-                                  self.__available_packages[DIRECTIVE_CACHE_PACKAGES],
-                                  PackageType.PACKAGE_FROM_TARGET,
-                                  self.__available_packages[DIRECTIVE_CACHE_NAME])
-        # Не нашли? Смотрим в вспомогательных кэшах
-        if result['status'] == PackageType.PACKAGE_NOT_FOUND:
-            for c in non_main_caches:
-                result = find_in_repo(dep,
-                                      c[DIRECTIVE_CACHE_PACKAGES],
-                                      PackageType.PACKAGE_FROM_NON_MAIN,
-                                      c[DIRECTIVE_CACHE_NAME])
-        # Выводим статус поиска
-        print_status(result['package'], result['status'])
-        return result
-
-    def __clean(self):
-        for p in listdir(self.__conf.frepodirpath):
-            remove('%s/%s' % (self.__conf.frepodirpath, p))
-
-    def run(self):
-        def check_depends(package):
-            def remove_dependency(dep, deps):
-                for d in deps:
-                    if isinstance(d, AlternativeRelationship):
-                        for r in d.relationships:
-                            if r == dep:
-                                deps.remove(d)
-                                return
-                    else:
-                        if d == dep:
-                            deps.remove(d)
-                            return
-                exit_with_error(_('Dependency \'%s\' is not found') % dep)
-
-            depends = Debhelper.get_binary_depends(self.__conf.repodirpath, package)
-            all_depends = deepcopy(depends)
-            package_name = re.match(DEB_RE, package).group('name')
-            packages_to_add = []
-            logging.info(_('Dependencies of \'%s\': %s') % (package_name, ', '.join(repr(r) for r in depends)))
-            while len(depends):
-                cur_dep = depends[0]
-                result = self.__get_package_destination(cur_dep)
-                # Пакет из основного репозитория
-                if result['status'] == PackageType.PACKAGE_FROM_MAIN:
-                    remove_dependency(result['dependency'], depends)
-                # Нашли зависимость в уже собранных пакетах?
-                # Удаляем текущую зависимость.
-                # Определяем зависимости для зависимости, включаем их в depends,
-                # Включаем зависимость в список пакетов для добавления
-                elif result['status'] == PackageType.PACKAGE_FROM_TARGET:
-                    remove_dependency(result['dependency'], depends)
-                    dpackage = [p for p in listdir(self.__conf.repodirpath)
-                                if (re.match(DEB_RE, p) and re.match(DEB_RE, p).group('name') == result['package'])]
-                    if len(dpackage) == 0:
-                        continue
-                    elif len(dpackage) > 1:
-                        # В репозитории оказались больше 1 пакета с разными версиями,
-                        # берем тот, версия у которого версия будет старше.
-                        dpackage = sorted(dpackage, reverse=True)
-                    dpackage = dpackage[0]
-                    if not dpackage:
-                        exit_with_error(_('Failed to find deb file \'%s\'' % result['package']))
-                    new_depends = Debhelper.get_binary_depends(self.__conf.repodirpath, dpackage)
-                    # Удаляем все записимости, когда-то присутствующие в новых зависимостях
-                    new_depends = [d for d in new_depends if d not in all_depends]
-                    logging.debug(_('Additional dependencies of \'%s\': %s') % (dpackage, new_depends))
-                    depends = depends + deepcopy(new_depends)
-                    all_depends = all_depends + deepcopy(new_depends)
-                    if dpackage not in packages_to_add:
-                        packages_to_add.append(dpackage)
-                # Нашли пакет в кэше в вспомогательном (диске разработки)
-                elif result['status'] == PackageType.PACKAGE_FROM_NON_MAIN:
-                    exit_with_error(_('Dependency of \'%s\' \'%s\' is not on main repository') % (
-                                    package_name, result['package']))
-                elif result['status'] == PackageType.PACKAGE_NOT_FOUND:
-                    exit_with_error(_('Could not resolve dependencies for package \'%s\': %s') % (
-                                    package_name, result['package']))
-                else:
-                    exit_with_error('UNEXPECTED status: %s' % result)
-            return packages_to_add
-
-        # Очистка всех существующих файлов в директории
-        self.__clean()
-        for deb in self.__required_packages:
-            packages = [p for p in listdir(self.__conf.repodirpath)
-                        if (re.match(DEB_RE, p) and re.match(DEB_RE, p).group('name') == deb)]
-            # В репозитории оказались больше 1 пакета с разными версиями,
-            # берем тот, версия у которого версия будет старше.
-            if len(packages) == 0:
-                exit_with_error(_('No one binary package with name \'%s\' is found') % deb)
-            if len(packages) > 1:
-                packages = sorted(packages, reverse=True)
-            package = packages[0]
-            if package:
-                ddeb = check_depends(package)
-                Debhelper.copy_files(self.__conf.repodirpath, self.__conf.frepodirpath, [package])
-                # Копируем зависимости для пакета
-                if ddeb:
-                    logging.debug(_('Copying dependencies for package \'%s\': %s') % (package, ddeb))
-                    Debhelper.copy_files(self.__conf.repodirpath, self.__conf.frepodirpath, ddeb)
-            else:
-                exit_with_error(_('Package with name \'%s\' does not exist') % deb)
-        Debhelper.generate_packages_list(self.__conf.frepodirpath)
+            unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
+            deps_in_dev = [d for d in deps if d[2] == PackageType.PACKAGE_FROM_OS_DEV_REPO]
+            if len(unresolve):
+                for p in unresolve:
+                    package_name, package_ver = p.name, p.versions[0].version
+                    logging.error(_('Could not resolve %s for %s: %s version %s') %
+                                   ('dependency' if p[0] == required else 'subdependency',
+                                    required, package_name, package_ver))
+                exit_with_error(_('Could not resolve dependencies'))
+            if len(deps_in_dev):
+                for p in deps_in_dev:
+                    package_name, package_ver = p.name, p.versions[0].version
+                    logging.error(_('%s %s(%s) for %s is founded in os-dev repo') %
+                                   ('Dependency' if p[0] == required else 'Subdependency',
+                                    package_name, package_ver, p[0]))
+                exit_with_error(_('Could not resolve dependencies'))
+            target_deps = [d for d in deps if d[2] == PackageType.PACKAGE_BUILDED]
+            files_to_copy = set([p[1].versions[0].filename for p in target_deps])
+            target_builded_deps.update(files_to_copy)
+            logging.debug(_('Copying dependencies for package \'%s\': %s') % (required, files_to_copy))
+            for f in files_to_copy:
+                src = os.path.join(self.__conf.root, f)
+                dst = os.path.join(self.__conf.frepodirpath, basename(f))
+                try:
+                    logging.debug(_('Copying %s to %s') % (src, dst))
+                    copyfile(src, dst)
+                except Exception as e:
+                    exit_with_error(e)
+        logging.info(_('Processing dev repository ...'))
+        # Определяем репозиторий со средствами разработки -
+        # все пакеты из сборочного репозитория за вычетом всех, указанных в target
+        dev_packages = []
+        if self.__packages.get('target-dev', None) is None:
+            for f in listdir(self.__conf.repodirpath):
+                m = re.match(DEB_RE, f)
+                if m:
+                    package_name = m.group('name')
+                    dev_packages.append(package_name)
+            dev_packages = sorted([p for p in set(dev_packages) - set(self.__packages['target'])])
+        else:
+            dev_packages = self.__packages['target-dev']
+        for pkg in dev_packages:
+            logging.info(_('Processing \'%s\' ...') % pkg)
+            deps = self.__get_depends_for_package(pkg, True)
+            unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
+            if len(unresolve):
+                for p in unresolve:
+                    package_name, package_ver = p.name, p.versions[0].version
+                    logging.error(_('Could not resolve %s for %s: %s version %s') %
+                                   ('dependency' if p[0] == required else 'subdependency',
+                                    required, package_name, package_ver))
+                exit_with_error(_('Could not resolve dependencies'))
+            builded = [d for d in deps if d[2] == PackageType.PACKAGE_BUILDED]
+            files_to_copy = set([p[1].versions[0].filename for p in builded])
+            intersection = files_to_copy & target_builded_deps
+            # Исключаем пересечения с основным репозиторием
+            files_to_copy -= intersection
+            logging.debug(_('Copying dependencies for package \'%s\': %s') % (pkg, files_to_copy))
+            for f in files_to_copy:
+                src = os.path.join(self.__conf.root, f)
+                dst = os.path.join(self.__conf.frepodevdirpath, basename(f))
+                try:
+                    logging.debug(_('Copying %s to %s') % (src, dst))
+                    copyfile(src, dst)
+                except Exception as e:
+                    exit_with_error(e)
 
 
 class PackageCacheMaker:
