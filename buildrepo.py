@@ -901,9 +901,9 @@ class PackageType:
      PACKAGE_NOT_FOUND) = range(0, 6)
 
 
-class RepoMaker2:
+class RepoMaker:
     class DependencyFinder:
-        def __init__(self, package, caches, target=True):
+        def __init__(self, package, caches):
             self.deps = list()
             aptcache = apt.Cache()
             self.__caches = caches
@@ -1005,8 +1005,8 @@ class RepoMaker2:
         if not os_dev_repo_exists:
             exit_with_error(_('Cache for OS dev repo is needed'))
 
-    def __get_depends_for_package(self, package, target=False):
-        depfinder = self.DependencyFinder(package, self.__caches, target)
+    def __get_depends_for_package(self, package):
+        depfinder = self.DependencyFinder(package, self.__caches)
         return depfinder.deps
 
     def run(self):
@@ -1020,7 +1020,7 @@ class RepoMaker2:
         target_builded_deps = set()
         for required in self.__packages['target']:
             logging.info(_('Processing \'%s\' ...') % required)
-            deps = self.__get_depends_for_package(required, True)
+            deps = self.__get_depends_for_package(required)
             unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
             deps_in_dev = [d for d in deps if d[2] == PackageType.PACKAGE_FROM_OS_DEV_REPO]
             if len(unresolve):
@@ -1064,7 +1064,7 @@ class RepoMaker2:
             dev_packages = self.__packages['target-dev']
         for pkg in dev_packages:
             logging.info(_('Processing \'%s\' ...') % pkg)
-            deps = self.__get_depends_for_package(pkg, True)
+            deps = self.__get_depends_for_package(pkg)
             unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
             if len(unresolve):
                 for p in unresolve:
@@ -1207,7 +1207,7 @@ if __name__ == '__main__':
             builder = Builder(root, abspath(args.source_list), args.clean, args.jobs)
             builder.run()
         elif args.command == COMMAND_MAKE_REPO:
-            repomaker = RepoMaker2(root, abspath(args.white_list))
+            repomaker = RepoMaker(root, abspath(args.white_list))
             repomaker.run()
         elif args.command == COMMAND_MAKE_PACKAGE_CACHE:
             cache_type = PackageType.PACKAGE_FROM_OS_REPO if args.primary else PackageType.PACKAGE_FROM_OS_DEV_REPO
