@@ -7,6 +7,8 @@ import gettext
 import os
 import gzip
 import apt
+import apt.debfile
+import apt_pkg
 from os import getuid, mkdir, devnull, chdir, listdir, remove
 from os.path import curdir, abspath, exists, basename, isdir
 from shutil import rmtree, copyfile
@@ -537,61 +539,6 @@ class Debhelper:
         return result
 
     @staticmethod
-    def get_binary_depends(repodirpath, deb_package):
-        # Создаем временную директорию для распаковки deb-пакета
-        tmpdirpath = mkdtemp(prefix='buildrepo')
-        # Копируем deb-пакет во временную директорию
-        Debhelper.copy_files(repodirpath, tmpdirpath, [deb_package])
-        command = 'dpkg-deb -R %s/%s %s' % (repodirpath, deb_package, tmpdirpath)
-        try:
-            Debhelper.run_command(command)
-        except CalledProcessError:
-            exit_with_error(_('Failed to unpack file \'%s\'') % deb_package)
-            rmtree(tmpdirpath)
-        control_file_path = '%s/DEBIAN/control' % tmpdirpath
-        if not exists(control_file_path):
-            rmtree(tmpdirpath)
-            exit_with_error(_('File \'%s\' does not exist') % deb_package)
-        lines = Debhelper.get_lines(control_file_path)
-        depends = []
-        for l in lines:
-            for d in Debhelper.__CONTROL_DEPENDS_LIKE_DIRECTIVES:
-                reg = '^%s:\s' % d
-                if re.match(reg, l):
-                    tokens = [t.strip() for t in re.split(reg, l) if t and not t.isspace()]
-                    if len(tokens) == 0 or len(tokens) > 1:
-                        exit_with_error(_('Error getting binary depends for \'%s\': expression: \'%s\'')
-                                        % (deb_package, l))
-                    else:
-                        depends += parse_depends(tokens[0])
-        rmtree(tmpdirpath)
-        return depends
-
-    @staticmethod
-    def get_binary_version(repodirpath, deb_package):
-        # Создаем временную директорию для распаковки deb-пакета
-        tmpdirpath = mkdtemp(prefix='buildrepo')
-        # Копируем deb-пакет во временную директорию
-        Debhelper.copy_files(repodirpath, tmpdirpath, [deb_package])
-        command = 'dpkg-deb -R %s/%s %s' % (repodirpath, deb_package, tmpdirpath)
-        try:
-            Debhelper.run_command(command)
-        except CalledProcessError:
-            exit_with_error(_('Failed to unpack file \'%s\'') % deb_package)
-            rmtree(tmpdirpath)
-        control_file_path = '%s/DEBIAN/control' % tmpdirpath
-        if not exists(control_file_path):
-            rmtree(tmpdirpath)
-            exit_with_error(_('File \'%s\' does not exist') % deb_package)
-        lines = Debhelper.get_lines(control_file_path)
-        for l in lines:
-            if l.startswith(Debhelper.__CONTROL_VERSION_DIRECTIVE):
-                version = l.split(Debhelper.__CONTROL_VERSION_DIRECTIVE)[1]
-                version = version.rstrip(END_OF_LINE) if version.endswith(END_OF_LINE) else version
-        rmtree(tmpdirpath)
-        return version
-
-    @staticmethod
     def copy_files(srcdir, dstdir, files):
         for f in files:
             src = '%s/%s' % (srcdir, f)
@@ -610,23 +557,6 @@ class Debhelper:
         except CalledProcessError:
             return False
         return True
-
-    @staticmethod
-    def get_provider_package_name(package_name):
-        command = 'apt-cache showpkg %s' % package_name
-        try:
-            output = Debhelper.run_command_with_output(command)
-        except CalledProcessError:
-            exit_with_error(_('Could not get information for package \'%s\'') % package_name)
-        found_provides_directive = False
-        packages = []
-        for l in output.split(END_OF_LINE):
-            if found_provides_directive:
-                if WHITE_SPACE in l:
-                    packages.append(l.split(WHITE_SPACE)[0])
-            if l.startswith(Debhelper.__CACHE_REVERSE_PROVIDES_DIRECTIVE):
-                found_provides_directive = True
-        return package_name if len(packages) == 0 else packages
 
     @staticmethod
     def check_installed_package_version(package):
@@ -650,12 +580,45 @@ class Debhelper:
         # Если не установлен пакет, зависимость не установлена
         if not installed_package_version:
             return False
-        command = 'dpkg --compare-versions %s \'%s\' %s' % (installed_package_version, package.operator, package.version)
+        command = 'dpkg --compare-versions %s \'%s\' %s' % (installed_package_version,
+                                                            package.operator,
+                                                            package.version)
         try:
             Debhelper.run_command(command)
         except CalledProcessError:
             return False
         return True
+
+    @staticmethod
+    def get_sources_filelist(conf, package):
+        candidate = package.versions[0]
+        package_name, package_ver = candidate.source_name, candidate.source_version
+        dscfilepath = '%s/%s_%s.dsc' % (conf.srcdirpath, package_name, package_ver)
+        try:
+            dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
+        except apt_pkg.Error as e:
+            exit_with_error(e)
+        filelist = ['%s/%s' % (conf.srcdirpath, f) for f in dscfile.filelist]
+        filelist = [dscfilepath] + filelist
+        return filelist
+
+
+class TemporaryDirManager(object):
+    def __init__(self, prefix='buildrepo'):
+        self.__dirs = []
+        self.__prefix = prefix
+
+    def __del__(self):
+        for d in self.__dirs:
+            if exists(d):
+                rmtree(d)
+
+    def create(self):
+        directory = mkdtemp(prefix=self.__prefix)
+        self.__dirs.append(directory)
+        return directory
+
+tmpdirmanager = TemporaryDirManager()
 
 
 class Configuration:
@@ -665,8 +628,8 @@ class Configuration:
         self.repodirpath = '%s/repo' % root
         self.datadirpath = '%s/data' % root
         self.logdirpath = '%s/logs' % root
-        self.debsdirpath = '%s/debs' % root
         self.cachedirpath = '%s/cache' % root
+        self.fsrcdirpath = '%s/fsrc' % root
         self.frepodirpath = '%s/frepo' % root
         self.frepodevdirpath = '%s/frepodev' % root
         self.packageslistpath = '%s/packageslist.txt' % self.datadirpath
@@ -708,7 +671,7 @@ class RepoInitializer:
 
         for _directory in [self.__conf.srcdirpath, self.__conf.datadirpath,
                            self.__conf.repodirpath, self.__conf.logdirpath,
-                           self.__conf.debsdirpath, self.__conf.cachedirpath,
+                           self.__conf.cachedirpath, self.__conf.fsrcdirpath,
                            self.__conf.frepodirpath, self.__conf.frepodevdirpath]:
             make_dir(_directory)
 
@@ -865,7 +828,7 @@ class Builder:
         logging.info(_('Executing scenario \'%s\' ...') % self.__scenario.name)
         for package_data in self.__scenario.packages:
             if not package_data.build_not_required:
-                tmpdirpath = mkdtemp(prefix='buildrepo')
+                tmpdirpath = tmpdirmanager.create()
                 Debhelper.run_command('chown -R %s.%s %s' % (BUILD_USER, BUILD_USER, tmpdirpath))
                 logging.debug(_('Creating temparary directory \'%s\'') % tmpdirpath)
                 # Копируем исходники из src во временную директорию
@@ -878,8 +841,6 @@ class Builder:
                 Debhelper.build_package(tmpdirpath, self.__conf.logdirpath, self.__jobs, package_data.options)
                 # Копируем *.deb в репозиторий
                 Debhelper.copy_debs(tmpdirpath, self.__conf.repodirpath)
-                # Удаляем временную директорию
-                rmtree(tmpdirpath)
             else:
                 # Копируем уже собранные файлы в репозиторий
                 copy_debs_files_to_repodir(package_data)
@@ -1011,13 +972,16 @@ class RepoMaker:
 
     def run(self):
         # Подготовка к созданию репозитория - очистка директорий
-        for directory in [self.__conf.frepodirpath, self.__conf.frepodevdirpath]:
+        for directory in [self.__conf.frepodirpath,
+                          self.__conf.frepodevdirpath,
+                          self.__conf.fsrcdirpath]:
             logging.debug(_('Clearing %s') % directory)
             for file in listdir(directory):
                 remove('%s/%s' % (directory, file))
         logging.info(_('Processing target repository ...'))
         # Анализ пакетов основного репозитория
         target_builded_deps = set()
+        sources = dict()
         for required in self.__packages['target']:
             logging.info(_('Processing \'%s\' ...') % required)
             deps = self.__get_depends_for_package(required)
@@ -1038,6 +1002,12 @@ class RepoMaker:
                                     package_name, package_ver, p[0]))
                 exit_with_error(_('Could not resolve dependencies'))
             target_deps = [d for d in deps if d[2] == PackageType.PACKAGE_BUILDED]
+            for p in target_deps:
+                package = p[1]
+                if package.name in sources.keys():
+                    continue
+                package_sources = Debhelper.get_sources_filelist(self.__conf, package)
+                sources[package.name] = package_sources
             files_to_copy = set([p[1].versions[0].filename for p in target_deps])
             target_builded_deps.update(files_to_copy)
             logging.debug(_('Copying dependencies for package \'%s\': %s') % (required, files_to_copy))
@@ -1078,6 +1048,11 @@ class RepoMaker:
             intersection = files_to_copy & target_builded_deps
             # Исключаем пересечения с основным репозиторием
             files_to_copy -= intersection
+            for package in [p[1] for p in builded]:
+                if package.name in sources.keys():
+                    continue
+                package_sources = Debhelper.get_sources_filelist(self.__conf, package)
+                sources[package.name] = package_sources
             logging.debug(_('Copying dependencies for package \'%s\': %s') % (pkg, files_to_copy))
             for f in files_to_copy:
                 src = os.path.join(self.__conf.root, f)
@@ -1085,6 +1060,15 @@ class RepoMaker:
                 try:
                     logging.debug(_('Copying %s to %s') % (src, dst))
                     copyfile(src, dst)
+                except Exception as e:
+                    exit_with_error(e)
+        for package_name, sourcelist in sources.items():
+            logging.info(_('Copying sources for package %s ...') % package_name)
+            for source in sourcelist:
+                dst = os.path.join(self.__conf.fsrcdirpath, basename(source))
+                try:
+                    logging.debug(_('Copying %s to %s') % (src, dst))
+                    copyfile(source, dst)
                 except Exception as e:
                     exit_with_error(e)
 
