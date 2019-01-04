@@ -9,6 +9,7 @@ import gzip
 import apt
 import apt.debfile
 import apt_pkg
+import pwd
 from os import getuid, mkdir, devnull, chdir, listdir, remove
 from os.path import curdir, abspath, exists, basename, isdir
 from shutil import rmtree, copyfile
@@ -34,6 +35,8 @@ DSC_RE = '^%s_(?P<version>[\w\.\-\~\+]+)\.dsc$'
 STANDART_BUILD_OPTIONS_TEMPLATE = 'DEB_BUILD_OPTIONS="nocheck parallel=%d"'
 DPKG_IGNORED_CODES = [1]
 
+REQUIRED_PACKAGES = ['dpkg-dev', 'fakeroot']
+
 BUILD_USER = 'builder'
 
 # Ключи кэша
@@ -43,7 +46,6 @@ DIRECTIVE_CACHE_VERSION = 'version'
 DIRECTIVE_CACHE_PACKAGES = 'packages'
 DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME = 'name'
 DIRECTIVE_CACHE_PACKAGES_PACKAGE_VERSION = 'version'
-DIRECTIVE_CACHE_PACKAGES_PACKAGE_PROVIDES = 'provides'
 
 # gettext
 _ = gettext.gettext
@@ -91,12 +93,30 @@ class Debhelper:
             check_call(command, shell=True)
 
     @staticmethod
-    def check_is_dpkg_dev_installed():
-        command = 'dpkg --list | grep dpkg-dev'
+    def base_init():
+        # Проверяем пакеты, которые должны быть уже установлены
+        cache = apt.Cache()
+        for pname in REQUIRED_PACKAGES:
+            package = cache.get(pname)
+            if not package:
+                exit_with_error(_('Could not get package %s from cache') % pname)
+            if not package.installed:
+                try:
+                    logging.info(_('Installing required package %s ...') % pname)
+                    package.mark_install()
+                    cache.commit()
+                except Exception as e:
+                    exit_with_error(_('Failed to install required package %s: %s') % (pname, e))
+        # Проверяем наличие учетной записи пользователя,
+        # от имени которого будет выполяться сборка
         try:
-            Debhelper.run_command(command)
-        except CalledProcessError:
-            exit_with_error(_('Package \'dpkg-dev\' is required for building'))
+            pwd.getpwnam(BUILD_USER)
+        except KeyError:
+            logging.info(_('Creating user %s ...') % BUILD_USER)
+            try:
+                Debhelper.run_command('useradd %s' % BUILD_USER)
+            except Exception as e:
+                exit_with_error(_('Failed to add user %s') % BUILD_USER)
 
     @staticmethod
     def get_packages_list():
@@ -287,12 +307,16 @@ class Debhelper:
         if package:
             candidate = package.versions[0]
             package_name, package_ver = candidate.source_name, candidate.source_version
+            # TODO: Version hack
+            if ':' in package_ver:
+                package_ver = package_ver.split(':')[-1]
             dscfilepath = '%s/%s_%s.dsc' % (conf.srcdirpath, package_name, package_ver)
         else:
             dscfilepath = '%s/%s' % (conf.srcdirpath, dscfile)
         try:
             dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
         except apt_pkg.Error as e:
+            e.traceback()
             exit_with_error(e)
         filelist = ['%s/%s' % (conf.srcdirpath, f) for f in dscfile.filelist]
         filelist = [dscfilepath] + filelist
@@ -346,14 +370,20 @@ class Configuration:
         logging.getLogger('').addHandler(console)
 
 
-class RepoInitializer:
+class BaseCommand(object):
+    def __init__(self, root):
+        if not os.path.exists(root):
+            os.makedirs(root)
+        self._conf = Configuration(root)
+        Debhelper.base_init()
+
+
+class RepoInitializer(BaseCommand):
     """
     Класс выполняет подготовку при инициализации репозитория
     """
     def __init__(self, root):
-        if not exists(root):
-            mkdir(root)
-        self.__conf = Configuration(root)
+        super().__init__(root)
 
     def __init_build_dirs(self):
         """
@@ -365,20 +395,20 @@ class RepoInitializer:
             mkdir(directory)
             logging.debug(_('Creating directory \'%s\'') % directory)
 
-        for _directory in [self.__conf.srcdirpath, self.__conf.datadirpath,
-                           self.__conf.repodirpath, self.__conf.logdirpath,
-                           self.__conf.cachedirpath, self.__conf.fsrcdirpath,
-                           self.__conf.frepodirpath, self.__conf.frepodevdirpath]:
+        for _directory in [self._conf.srcdirpath, self._conf.datadirpath,
+                           self._conf.repodirpath, self._conf.logdirpath,
+                           self._conf.cachedirpath, self._conf.fsrcdirpath,
+                           self._conf.frepodirpath, self._conf.frepodevdirpath]:
             make_dir(_directory)
 
     def __init_packages_list(self):
         """
         Записывает в файл список пакетов системы
         """
-        packagelist_file = open(self.__conf.packageslistpath, mode='w')
+        packagelist_file = open(self._conf.packageslistpath, mode='w')
         packagelist_file.writelines([line + END_OF_LINE for line in Debhelper.get_packages_list()])
         packagelist_file.close()
-        logging.info(_('Creating package list of system in file \'%s\'') % self.__conf.packageslistpath)
+        logging.info(_('Creating package list of system in file \'%s\'') % self._conf.packageslistpath)
 
     def __init_repo(self, repo_filename, repo_path):
         repo_file = open(repo_filename, mode='w')
@@ -398,10 +428,10 @@ class RepoInitializer:
         # Инициализируем список пакетов
         self.__init_packages_list()
         # Инициализация репозитория
-        self.__init_repo(REPO_FILE_NAME, self.__conf.repodirpath)
+        self.__init_repo(REPO_FILE_NAME, self._conf.repodirpath)
 
 
-class Builder:
+class Builder(BaseCommand):
     class PackageData:
         def __init__(self, name, version=None, options=None):
             self.name = name
@@ -463,9 +493,9 @@ class Builder:
     Класс выполняет сборку пакетов
     """
     def __init__(self, repodirpath, scenario_path, clean, jobs):
+        super().__init__(repodirpath)
         if not exists(scenario_path):
             exit_with_error(_('File \'%s\' does not exist') % scenario_path)
-        self.__conf = Configuration(repodirpath)
         self.__clean = clean
         self.__jobs = jobs
         self.__scenario = self.Scenario(scenario_path)
@@ -476,7 +506,7 @@ class Builder:
     def __make_clean(self):
         logging.info(_('Package cleaning before rebuilding...'))
         init_packages_list = [p.rstrip(END_OF_LINE)
-                              for p in open(self.__conf.packageslistpath, mode='r').readlines()
+                              for p in open(self._conf.packageslistpath, mode='r').readlines()
                               if p.endswith(END_OF_LINE)]
         current_package_list = Debhelper.get_packages_list()
         diff = [item for item in current_package_list if item not in init_packages_list]
@@ -489,7 +519,7 @@ class Builder:
         def copy_files_to_builddir(package_data, tmpdirpath):
             reg_dsc = DSC_RE % package_data.name
             reg_dsc = fix_re(reg_dsc)
-            dsc_files = [f for f in listdir(self.__conf.srcdirpath) if re.search(reg_dsc, f)]
+            dsc_files = [f for f in listdir(self._conf.srcdirpath) if re.search(reg_dsc, f)]
             versions = [re.match(reg_dsc, v).group('version') for v in dsc_files]
             if not len(versions) == 1 and package_data.version is None:
                 if len(versions) == 0:
@@ -500,7 +530,7 @@ class Builder:
                     ', '.join(versions)))
             # Определяем файлы для копирования
             try:
-                files = Debhelper.get_sources_filelist(self.__conf, dscfile=dsc_files[0])
+                files = Debhelper.get_sources_filelist(self._conf, dscfile=dsc_files[0])
             except IndexError:
                 exit_with_error(_('Failed determine files to copy \'%s\'') % package_data.name)
             # Копируем файлы во временную директорию
@@ -519,9 +549,9 @@ class Builder:
                 search = package_data.name
             else:
                 search = '%s_%s' % (package_data.name, package_data.version)
-            files = [file_name for file_name in listdir(self.__conf.debsdirpath)
+            files = [file_name for file_name in listdir(self._conf.debsdirpath)
                      if file_name.startswith(search) and file_name.endswith('.deb')]
-            Debhelper.copy_files(self.__conf.debsdirpath, self.__conf.repodirpath, files)
+            Debhelper.copy_files(self._conf.debsdirpath, self._conf.repodirpath, files)
 
         logging.info(_('Executing scenario \'%s\' ...') % self.__scenario.name)
         for package_data in self.__scenario.packages:
@@ -535,11 +565,11 @@ class Builder:
             # Определяем зависимости
             Debhelper.install_build_depends(tmpdirpath, package_data.name)
             # Запускаем сборку
-            Debhelper.build_package(tmpdirpath, self.__conf.logdirpath, self.__jobs, package_data.options)
+            Debhelper.build_package(tmpdirpath, self._conf.logdirpath, self.__jobs, package_data.options)
             # Копируем *.deb в репозиторий
-            Debhelper.copy_debs(tmpdirpath, self.__conf.repodirpath)
+            Debhelper.copy_debs(tmpdirpath, self._conf.repodirpath)
             # Обновляем репозиторий
-            Debhelper.generate_packages_list(self.__conf.repodirpath)
+            Debhelper.generate_packages_list(self._conf.repodirpath)
 
     def run(self):
         if self.__clean:
@@ -556,7 +586,7 @@ class PackageType:
      PACKAGE_NOT_FOUND) = range(0, 6)
 
 
-class RepoMaker:
+class RepoMaker(BaseCommand):
     class DependencyFinder:
         def __init__(self, package, caches):
             self.deps = list()
@@ -593,9 +623,9 @@ class RepoMaker:
                         self.__deps_recurse(s, package)
 
     def __init__(self, repodirpath, white_list_path):
+        super().__init__(repodirpath)
         if not exists(white_list_path):
             exit_with_error(_('File \'%s\' does not exist') % white_list_path)
-        self.__conf = Configuration(repodirpath)
         self.__white_list = white_list_path
         self.__packages = {}
         self.__caches = []
@@ -637,18 +667,18 @@ class RepoMaker:
 
     def __build_cache_of_builded_packages(self):
         logging.info(_('Build cache for builded packages ...'))
-        maker = PackageCacheMaker(self.__conf.root,
-                                  self.__conf.repodirpath,
+        maker = PackageCacheMaker(self._conf.root,
+                                  self._conf.repodirpath,
                                   'builded',
                                   PackageType.PACKAGE_BUILDED)
         maker.run(is_builded=True)
 
     def __load_caches(self):
-        files = [f for f in listdir(self.__conf.cachedirpath) if f.endswith('.cache')]
+        files = [f for f in listdir(self._conf.cachedirpath) if f.endswith('.cache')]
         if len(files) <= 1:
             exit_with_error(_('No one cache is created'))
         for f in files:
-            path = '%s/%s' % (self.__conf.cachedirpath, f)
+            path = '%s/%s' % (self._conf.cachedirpath, f)
             with open(path, mode='r') as json_data:
                 self.__caches.append(json.load(json_data))
         os_repo_exists = any([cache[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_FROM_OS_REPO
@@ -666,9 +696,9 @@ class RepoMaker:
 
     def run(self):
         # Подготовка к созданию репозитория - очистка директорий
-        for directory in [self.__conf.frepodirpath,
-                          self.__conf.frepodevdirpath,
-                          self.__conf.fsrcdirpath]:
+        for directory in [self._conf.frepodirpath,
+                          self._conf.frepodevdirpath,
+                          self._conf.fsrcdirpath]:
             logging.debug(_('Clearing %s') % directory)
             for file in listdir(directory):
                 remove('%s/%s' % (directory, file))
@@ -700,14 +730,14 @@ class RepoMaker:
                 package = p[1]
                 if package.name in sources.keys():
                     continue
-                package_sources = Debhelper.get_sources_filelist(self.__conf, package=package)
+                package_sources = Debhelper.get_sources_filelist(self._conf, package=package)
                 sources[package.name] = package_sources
             files_to_copy = set([p[1].versions[0].filename for p in target_deps])
             target_builded_deps.update(files_to_copy)
             logging.debug(_('Copying dependencies for package \'%s\': %s') % (required, files_to_copy))
             for f in files_to_copy:
-                src = os.path.join(self.__conf.root, f)
-                dst = os.path.join(self.__conf.frepodirpath, basename(f))
+                src = os.path.join(self._conf.root, f)
+                dst = os.path.join(self._conf.frepodirpath, basename(f))
                 try:
                     logging.debug(_('Copying %s to %s') % (src, dst))
                     copyfile(src, dst)
@@ -718,7 +748,7 @@ class RepoMaker:
         # все пакеты из сборочного репозитория за вычетом всех, указанных в target
         dev_packages = []
         if self.__packages.get('target-dev', None) is None:
-            for f in listdir(self.__conf.repodirpath):
+            for f in listdir(self._conf.repodirpath):
                 m = re.match(DEB_RE, f)
                 if m:
                     package_name = m.group('name')
@@ -745,12 +775,12 @@ class RepoMaker:
             for package in [p[1] for p in builded]:
                 if package.name in sources.keys():
                     continue
-                package_sources = Debhelper.get_sources_filelist(self.__conf, package)
+                package_sources = Debhelper.get_sources_filelist(self._conf, package)
                 sources[package.name] = package_sources
             logging.debug(_('Copying dependencies for package \'%s\': %s') % (pkg, files_to_copy))
             for f in files_to_copy:
-                src = os.path.join(self.__conf.root, f)
-                dst = os.path.join(self.__conf.frepodevdirpath, basename(f))
+                src = os.path.join(self._conf.root, f)
+                dst = os.path.join(self._conf.frepodevdirpath, basename(f))
                 try:
                     logging.debug(_('Copying %s to %s') % (src, dst))
                     copyfile(src, dst)
@@ -759,7 +789,7 @@ class RepoMaker:
         for package_name, sourcelist in sources.items():
             logging.info(_('Copying sources for package %s ...') % package_name)
             for source in sourcelist:
-                dst = os.path.join(self.__conf.fsrcdirpath, basename(source))
+                dst = os.path.join(self._conf.fsrcdirpath, basename(source))
                 try:
                     logging.debug(_('Copying %s to %s') % (src, dst))
                     copyfile(source, dst)
@@ -767,17 +797,15 @@ class RepoMaker:
                     exit_with_error(e)
 
 
-class PackageCacheMaker:
+class PackageCacheMaker(BaseCommand):
     __DIRECTIVE_PACKAGE = 'Package: '
     __DIRECTIVE_VERSION = 'Version: '
-    __DIRECTIVE_PROVIDES = 'Provides: '
-    __DIRECTIVE_PROVIDES_MANY = ', '
     __DIRECTIVE_DESCRIPTION_ENDS = ''
 
     def __init__(self, repodirpath, mount_point, name, cache_type):
+        super().__init__(repodirpath)
         if not exists(mount_point):
             exit_with_error(_('Path \'%s\' does not exist') % mount_point)
-        self.__conf = Configuration(repodirpath)
         self.__name = name
         self.__mount_point = mount_point
         self.__cache_type = cache_type
@@ -787,7 +815,7 @@ class PackageCacheMaker:
             packages_path = Debhelper.find_packages_files(self.__mount_point)
         else:
             packages_path = ['%s/Packages' % self.__mount_point]
-        cache_file_path = '%s/%s.cache' % (self.__conf.cachedirpath, self.__name)
+        cache_file_path = '%s/%s.cache' % (self._conf.cachedirpath, self.__name)
         result = {DIRECTIVE_CACHE_NAME: self.__name,
                   DIRECTIVE_CACHE_TYPE: self.__cache_type}
         packages = []
@@ -802,23 +830,15 @@ class PackageCacheMaker:
             version = str()
             package_name = str()
             version = str()
-            provides = None
             for line in lines:
                 if line.startswith(self.__DIRECTIVE_PACKAGE):
                     package_name = line.split(self.__DIRECTIVE_PACKAGE)[1]
                 elif line.startswith(self.__DIRECTIVE_VERSION):
                     version = line.split(self.__DIRECTIVE_VERSION)[1]
-                elif line.startswith(self.__DIRECTIVE_PROVIDES):
-                    provides_line = line.split(self.__DIRECTIVE_PROVIDES)[1]
-                    if self.__DIRECTIVE_PROVIDES_MANY in provides_line:
-                        provides = provides_line.split(self.__DIRECTIVE_PROVIDES_MANY)
-                    else:
-                        provides = [provides_line]
                 elif line == self.__DIRECTIVE_DESCRIPTION_ENDS:
                     data = {
                         DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME: package_name,
-                        DIRECTIVE_CACHE_PACKAGES_PACKAGE_VERSION: version,
-                        DIRECTIVE_CACHE_PACKAGES_PACKAGE_PROVIDES: provides
+                        DIRECTIVE_CACHE_PACKAGES_PACKAGE_VERSION: version
                     }
                     packages.append(data)
         result[DIRECTIVE_CACHE_PACKAGES] = packages
@@ -875,8 +895,6 @@ if __name__ == '__main__':
     Configuration.init_logger(root)
     # Проверяем наличие прав суперпользователя
     check_root_access()
-    # Проверяем наличие пакета dpkg-dev, необходимого для сборки
-    Debhelper.check_is_dpkg_dev_installed()
     try:
         if args.command == COMMAND_INIT:
             initializer = RepoInitializer(root)
