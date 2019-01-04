@@ -148,7 +148,7 @@ class Debhelper:
 
     @staticmethod
     def extract_sources(tmpdirpath, package_name):
-        logging.info(_('Unpacking sources \'%s\'...') % package_name)
+        logging.info(_('Unpacking sources %s ...') % package_name)
         command = 'dpkg-source -x *.dsc && chown -R %s.%s *' % (BUILD_USER, BUILD_USER)
         CURDIR = abspath(curdir)
         chdir(tmpdirpath)
@@ -233,7 +233,7 @@ class Debhelper:
         log_file = '%s/%s.log' % (logdir, basename(dirpath))
         command = 'sudo -u %s %s dpkg-buildpackage' \
                   % (BUILD_USER, options)
-        logging.info(_('Package building \'%s\'') % basename(dirpath))
+        logging.info(_('Package building %s ...') % basename(dirpath))
         try:
             logstream = open(log_file, mode='w')
         except OSError as e:
@@ -246,9 +246,8 @@ class Debhelper:
         returncode = proc.returncode
         if returncode:
             if returncode not in DPKG_IGNORED_CODES:
-                rmtree(tmpdirpath)
                 chdir(CURDIR)
-                exit_with_error(_('Package \'%s\' build is failed: Command \'%s\' return exit code %d') % (
+                exit_with_error(_('Package \'%s\' building is failed: Command \'%s\' return exit code %d') % (
                     basename(dirpath),
                     command,
                     returncode))
@@ -404,19 +403,17 @@ class RepoInitializer:
 
 class Builder:
     class PackageData:
-        def __init__(self, name, version=None, build_not_required=False, options=None):
+        def __init__(self, name, version=None, options=None):
             self.name = name
             self.version = version
-            self.build_not_required = build_not_required
             self.options = options
 
         def __repr__(self):
-            return '%s: %s %s' % (self.name, self.version, self.build_not_required)
+            return '%s: %s %s' % (self.name, self.version)
 
     class Scenario:
         __NAME_TAG = '# Name:'
         __COMMENT_TAG = '#'
-        __BUILD_NOT_REQUIRED_TAG = '-'
         __BUILD_OPTIONS_TAG = 'options='
         __BUILD_VERSION = 'version='
         __BUILD_OPTIONS_NONE = 'None'
@@ -442,10 +439,6 @@ class Builder:
                         continue
                     else:
                         tokens = [e for e in line.split(WHITE_SPACE) if not e.isspace()]
-                        build_not_required = False
-                        if tokens[0].startswith(self.__BUILD_NOT_REQUIRED_TAG):
-                            tokens[0] = tokens[0].lstrip('-')
-                            build_not_required = True
                         # Нашли и пакет, и версию
                         name = str()
                         version = None
@@ -459,7 +452,7 @@ class Builder:
                                 options = t.replace(self.__BUILD_OPTIONS_TAG, EMPTY_SPACE)
                                 if options == self.__BUILD_OPTIONS_NONE:
                                     options = None
-                        package_data = Builder.PackageData(name, version, build_not_required, options)
+                        package_data = Builder.PackageData(name, version, options)
                         self.packages.append(package_data)
                 if self.name is None:
                     exit_with_error(_('Scenario name is missing in file \'%s\'') % self.scenario_path)
@@ -532,23 +525,19 @@ class Builder:
 
         logging.info(_('Executing scenario \'%s\' ...') % self.__scenario.name)
         for package_data in self.__scenario.packages:
-            if not package_data.build_not_required:
-                tmpdirpath = tmpdirmanager.create()
-                Debhelper.run_command('chown -R %s.%s %s' % (BUILD_USER, BUILD_USER, tmpdirpath))
-                logging.debug(_('Creating temparary directory \'%s\'') % tmpdirpath)
-                # Копируем исходники из src во временную директорию
-                copy_files_to_builddir(package_data, tmpdirpath)
-                # Распаковываем пакет
-                Debhelper.extract_sources(tmpdirpath, package_data.name)
-                # Определяем зависимости
-                Debhelper.install_build_depends(tmpdirpath, package_data.name)
-                # Запускаем сборку
-                Debhelper.build_package(tmpdirpath, self.__conf.logdirpath, self.__jobs, package_data.options)
-                # Копируем *.deb в репозиторий
-                Debhelper.copy_debs(tmpdirpath, self.__conf.repodirpath)
-            else:
-                # Копируем уже собранные файлы в репозиторий
-                copy_debs_files_to_repodir(package_data)
+            tmpdirpath = tmpdirmanager.create()
+            Debhelper.run_command('chown -R %s.%s %s' % (BUILD_USER, BUILD_USER, tmpdirpath))
+            logging.debug(_('Creating temparary directory \'%s\'') % tmpdirpath)
+            # Копируем исходники из src во временную директорию
+            copy_files_to_builddir(package_data, tmpdirpath)
+            # Распаковываем пакет
+            Debhelper.extract_sources(tmpdirpath, package_data.name)
+            # Определяем зависимости
+            Debhelper.install_build_depends(tmpdirpath, package_data.name)
+            # Запускаем сборку
+            Debhelper.build_package(tmpdirpath, self.__conf.logdirpath, self.__jobs, package_data.options)
+            # Копируем *.deb в репозиторий
+            Debhelper.copy_debs(tmpdirpath, self.__conf.repodirpath)
             # Обновляем репозиторий
             Debhelper.generate_packages_list(self.__conf.repodirpath)
 
