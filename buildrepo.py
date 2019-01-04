@@ -31,17 +31,10 @@ END_OF_LINE = '\n'
 DEB_RE = '^(?P<name>[\w\-\.]+)_(?P<version>[\w\.\-\~\+]+)_(?P<arch>[\w]+)\.deb$'
 DSC_FULL_RE = '^(?P<name>[\w\-\.\+]+)_(?P<version>[\w\.\-\~\+]+)\.dsc$'
 DSC_RE = '^%s_(?P<version>[\w\.\-\~\+]+)\.dsc$'
-DSC_PACKAGE_VERSION_RE = '^(?P<name>[\w\-\.\+]+)\s\((?P<version>[<>=\w\:\s\.\-~\+]+)\)$'
-DSC_CONTENT_RE = '^(?P<tag>[\w\-]+):\s(?P<value>[\w\.\s\(\)\-\,\~\+\=|\[\]\<\>\+:@/!]+)$'
-DSC_CONTENT_MULTI_RE = '^(?P<tag>[\w\-]+):\s?$'
 STANDART_BUILD_OPTIONS_TEMPLATE = 'DEB_BUILD_OPTIONS="nocheck parallel=%d"'
 DPKG_IGNORED_CODES = [1]
 
 BUILD_USER = 'builder'
-
-# В deb пакете таким макросом помечаются пакеты, необходимые определенным платформам.
-SUPPORTED_PLATFORMS = ['amd64', 'linux-any']
-CURRENT_ARCH = 'amd64'
 
 # Ключи кэша
 DIRECTIVE_CACHE_NAME = 'cache_name'
@@ -51,11 +44,6 @@ DIRECTIVE_CACHE_PACKAGES = 'packages'
 DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME = 'name'
 DIRECTIVE_CACHE_PACKAGES_PACKAGE_VERSION = 'version'
 DIRECTIVE_CACHE_PACKAGES_PACKAGE_PROVIDES = 'provides'
-
-# Тэги наличия хэша в dsc файле
-DSC_MESSAGE_BEGIN = '-----BEGIN PGP SIGNED MESSAGE-----'
-DSC_PGP_SIGNATURE_BEGIN = '-----BEGIN PGP SIGNATURE-----'
-DSC_PGP_SIGNATURE_END = '-----END PGP SIGNATURE-----'
 
 # gettext
 _ = gettext.gettext
@@ -76,178 +64,6 @@ def fix_re(reg_exp):
     if '++' in reg_exp:
         return reg_exp.replace('++', '\++')
     return reg_exp
-
-# ###########################################################################################################################
-# Парсинг зависимостей
-
-
-class OrderedObject(object):
-    def __eq__(self, other):
-        return type(self) is type(other) and self._key() == other._key()
-
-    def __lt__(self, other):
-        return isinstance(other, OrderedObject) and self._key() < other._key()
-
-    def __hash__(self):
-        return hash(self.__class__) ^ hash(self._key())
-
-    def _key(self):
-        raise NotImplementedError()
-
-
-def parse_versioned_or_simple_dep(depstring):
-    """
-    Разбор зависимости (простой или версионной)
-    @param depstring: str -- строка, содержащая зависимость
-    @returns: Relationship or VersionedRelationship or None, если зависимость не под текущую платформу
-    """
-    # 1. Определяем наличие тега архитектуры
-    parsed = depstring
-    if '[' in parsed:
-        start = parsed.index('[')
-        end = parsed.index(']')
-        archrow = parsed[start + 1: end]
-        parsed = parsed[:start - 1]
-        arches = re.split('\s', archrow)
-        dep_enabled = False
-        for pl in SUPPORTED_PLATFORMS:
-            # TODO: обработать знак инверсии зависимости '!'
-            if pl in arches:
-                dep_enabled = True
-                break
-        # Зависимость не требуется для текущей платформы
-        if not dep_enabled:
-            return None
-    # 2. Определяем тип зависимости
-    versioned = re.match(DSC_PACKAGE_VERSION_RE, parsed)
-    if versioned:
-        name = versioned.group('name')
-        version = versioned.group('version')
-        operator, version = re.split('\s', version)
-        return VersionedRelationship(name, operator, version)
-    else:
-        return Relationship(parsed)
-
-
-def parse_depends(relationships):
-    parsed_deps = []
-    deps = re.split('\s*,\s*', relationships)
-    for dep in deps:
-        if '|' in dep:
-            alt_deps = re.split('\s*\|\s*', dep)
-            alt1 = parse_versioned_or_simple_dep(alt_deps[0])
-            alt2 = parse_versioned_or_simple_dep(alt_deps[1])
-            if alt1 and alt2:
-                parsed_deps.append(AlternativeRelationship(alt1, alt2))
-            elif alt1 is None:
-                parsed_deps.append(alt2)
-            elif alt2 is None:
-                parsed_deps.append(alt1)
-        else:
-            pdep = parse_versioned_or_simple_dep(dep)
-            if pdep:
-                parsed_deps.append(pdep)
-    return parsed_deps
-
-
-class Relationship(OrderedObject):
-    def __init__(self, name):
-        self.name = name
-
-    @property
-    def names(self):
-        return set([self.name])
-
-    def matches(self, name, version=None):
-        return True if self.name == name else None
-
-    def __repr__(self):
-        return '%s' % (', '.join([
-            '%s' % self.name
-        ]))
-
-    def _key(self):
-        return (self.name,)
-
-
-class VersionedRelationship(Relationship):
-    def __init__(self, name, operator, version):
-        self.name = name
-        self.operator = operator
-        self.version = version
-
-    def matches(self, name, version=None):
-        if self.name == name:
-            if version:
-                Debhelper.compare_versions(version, self.operator, self.version)
-            else:
-                return False
-
-    def __repr__(self):
-        return '%s %s %s' % (self.name, self.operator, self.version)
-
-    def _key(self):
-        return (self.name, self.operator, self.version)
-
-
-class AlternativeRelationship(Relationship):
-    def __init__(self, *relationships):
-        self.relationships = tuple(relationships)
-
-    @property
-    def names(self):
-        names = set()
-        for relationship in self.relationships:
-            names |= relationship.names
-        return names
-
-    def matches(self, name, version=None):
-        matches = None
-        for alternative in self.relationships:
-            alternative_matches = alternative.matches(name, version)
-            if alternative_matches is True:
-                return True
-            elif alternative_matches is False:
-                # Keep looking for a match but return False if we don't find one.
-                matches = False
-        return matches
-
-    def __repr__(self):
-        return '%s' % (' | '.join(repr(r) for r in self.relationships))
-
-    def _key(self):
-        return self.relationships
-
-
-class RelationshipSet(OrderedObject):
-    def __init__(self, *relationships):
-        self.relationships = tuple(relationships)
-
-    @property
-    def names(self):
-        names = set()
-        for relationship in self.relationships:
-            names |= relationship.names
-        return names
-
-    def matches(self, name, version=None):
-        results = [r.matches(name, version) for r in self.relationships]
-        matches = [r for r in results if r is not None]
-        return all(matches) if matches else None
-
-    def __repr__(self, pretty=False, indent=0):
-        prefix = '('
-        indent += len(prefix)
-        delimiter = ',\n%s' % (' ' * indent) if pretty else ', '
-        return prefix + delimiter.join(repr(r) for r in self.relationships) + ')'
-
-    def _key(self):
-        return self.relationships
-
-    def __iter__(self):
-        return iter(self.relationships)
-
-# ###########################################################################################################################
 
 
 class Debhelper:
@@ -331,23 +147,6 @@ class Debhelper:
                 exit_with_error(_('Error while package \'%s\' deleting: %s') % (package_name, error))
 
     @staticmethod
-    def get_source_files_to_extract(dscfilepath):
-        lines = Debhelper.get_lines(dscfilepath)
-        found_files_line = False
-        files = [basename(dscfilepath)]
-        for line in lines:
-            if line.startswith(Debhelper.__DSC_FILES_DIRECTIVE) and not found_files_line:
-                found_files_line = True
-            elif found_files_line and (len(line) == 0 or not line.startswith(' ')):
-                break
-            elif found_files_line:
-                tokens = [t for t in line.split(' ') if not t.isspace()]
-                files.append(tokens[-1])
-        if not found_files_line:
-            exit_with_error(_('Uncorrect dsc file \'%s\'') % dscfilepath)
-        return files
-
-    @staticmethod
     def extract_sources(tmpdirpath, package_name):
         logging.info(_('Unpacking sources \'%s\'...') % package_name)
         command = 'dpkg-source -x *.dsc && chown -R %s.%s *' % (BUILD_USER, BUILD_USER)
@@ -368,128 +167,62 @@ class Debhelper:
                 return path
 
     @staticmethod
-    def get_lines(filepath):
+    def install_build_depends(tmpdirpath, pkgname):
+        def install_alt_depends(cache, depends):
+            depstr = ' | '.join([' '.join([p[0], '(', p[2], p[1], ')'])
+                                if len(p[1]) else p[0] for p in depends])
+            for alt in depends:
+                pname, version, op = alt
+                pdep = cache.get(pname)
+                if pdep is None:
+                    exit_with_error(_('Failed to get package %s from cache') % pname)
+                if pdep.is_installed:
+                    if len(version) and not apt_pkg.check_dep(pdep.installed.version, op, version):
+                        continue
+                    logging.info(_('Package %s already installed') % pname)
+                    return
+                logging.info(_('Installing dependency %s ...') % pname)
+                try:
+                    pdep.mark_install()
+                    cache.commit()
+                    return
+                except apt_pkg.Error:
+                    continue
+            # Формируем строку зависимостей
+            exit_with_error(_('Could not resolve alternative depends %s for package %s') % (depstr, pkgname))
+
         try:
-            return [l.rstrip(END_OF_LINE) for l in open(filepath, mode='r').readlines() if l.endswith(END_OF_LINE)]
-        except Exception:
-            exit_with_error(_('Failed to open file \'%s\'') % filepath)
-
-    @staticmethod
-    def parse_dscfile(dscfilepath):
-        lines = Debhelper.get_lines(dscfilepath)
-        oldtag = str()
-        values = []
-        result = {}
-        # Определяем наличие хэша PGP
-        if DSC_MESSAGE_BEGIN in lines:
-            # Если есть, то отрезаем первые три строки (заголовок, имя хэша и пустая строка)
-            lines = lines[3:]
-            index_pgp_start = lines.index(DSC_PGP_SIGNATURE_BEGIN)
-            index_pgp_end = lines.index(DSC_PGP_SIGNATURE_END)
-            if not (index_pgp_start == 0 and index_pgp_end == 0):
-                # Дополнительно учитываем пустую строку перед DSC_SIGNATURE_BEGIN
-                lines = lines[:index_pgp_start - 1]
-            else:
-                exit_with_error(_('Uncorrect syntax of dsc file \'%s\'') % dscfilepath)
-        for l in lines:
-            match_row = re.match(DSC_CONTENT_RE, l)
-            match_multi_row = re.match(DSC_CONTENT_MULTI_RE, l)
-            if match_row:
-                tag = match_row.group('tag')
-                value = match_row.group('value')
-                result[tag] = value
-            elif match_multi_row:
-                tag = match_multi_row.group('tag')
-                if not oldtag == tag:
-                    result[oldtag] = values
-                    oldtag = str()
-                    values = []
-                oldtag = tag
-            else:
-                values.append(l.lstrip(WHITE_SPACE) if l.startswith(WHITE_SPACE) else l)
-        if len(tag) and len(values):
-            result[tag] = values
-        return result
-
-    @staticmethod
-    def get_build_depends(dscfilepath):
-        data = Debhelper.parse_dscfile(dscfilepath)
-        result = str()
-        for d in Debhelper.__DSC_BUILD_DEPENDS_LIKE_DIRECTIVES:
-            if d in data.keys():
-                if not len(result) == 0:
-                    result = '%s, %s' % (result, data[d])
-                else:
-                    result = data[d]
-        return result
-
-    @staticmethod
-    def get_build_conficts(dscfilepath):
-        data = Debhelper.parse_dscfile(dscfilepath)
-        build_conflicts = data.get(Debhelper.__DSC_BUILD_CONFICTS, None)
-        if build_conflicts:
-            build_conflicts = build_conflicts.replace(' ', '')
-            if ',' in build_conflicts:
-                return build_conflicts.split(',')
-            else:
-                return [build_conflicts]
-        return []
-
-    @staticmethod
-    def install_build_depends(tmpdirpath, package):
-        try:
-            dsc_file = next(f for f in listdir(tmpdirpath) if re.match(DSC_FULL_RE, f))
+            dscfilepath = next(f for f in listdir(tmpdirpath) if re.match(DSC_FULL_RE, f))
         except AttributeError:
             exit_with_error(_('dsc file does not exist'))
-        build_deps_row = Debhelper.get_build_depends('%s/%s' % (tmpdirpath, dsc_file))
-        parsed_deps = parse_depends(build_deps_row)
-        logging.debug(_('Depends for package \'%s\': %s') % (package, parsed_deps))
-        # Удаляем все сборочные конфликты, если они есть
-        for conf in Debhelper.get_build_conficts('%s/%s' % (tmpdirpath, dsc_file)):
+        dscfile = apt.debfile.DscSrcPackage(filename=os.path.join(tmpdirpath, dscfilepath))
+        cache = apt.Cache()
+        cache.update()
+        # TODO: Проверить по конфликтам
+        for dep in dscfile.depends:
+            # Обыкновенная зависимость
             try:
-                Debhelper.remove_package(conf)
-            except:
-                pass
-        for d in parsed_deps:
-            # Альтернативные зависимости?
-            if isinstance(d, AlternativeRelationship):
-                statuses = set()
-                for r in d.relationships:
-                    status = True
-                    command = 'apt-get install -y --force-yes --no-install-recommends %s' % r.name
-                    try:
-                        Debhelper.run_command(command)
-                    except CalledProcessError:
-                        status = False
-                    finally:
-                        # Определяем, поставилась ли хотя бы одна из зависимостей?
-                        message = _('Installing alternative dependency \'%s\' for \'%s\' ... %s') % (
-                                  r.name,
-                                  package,
-                                  _('success') if status else _('ERROR'))
-                        logging.info(message)
-                        statuses.add(status)
-                # Если не поставилась ни одна из альтернативных зависимостей -- выходим
-                if True not in statuses:
-                    exit_with_error(_('Could not resolve alternative depends for \'%s\'') % package)
-            # Обычная или версионная зависимость?
-            else:
-                status = True
-                try:
-                    command = 'apt-get install -y --force-yes --no-install-recommends %s' % d.name
-                    Debhelper.run_command(command)
-                except CalledProcessError:
-                    status = False
-                finally:
-                    if isinstance(d, VersionedRelationship) and status:
-                        status = Debhelper.check_installed_package_version(d)
-                    message = _('Installing dependency \'%s\' for \'%s\' ... %s') % (
-                              str(d),
-                              package,
-                              _('success') if status else _('ERROR'))
-                    logging.info(message)
-                    if not status:
-                        exit_with_error(_('Could not resolve depends for \'%s\'') % package)
+                if len(dep) == 1:
+                    pname, version, op = dep[0]
+                    pdep = cache.get(pname)
+                    if pdep is None:
+                        exit_with_error(_('Failed to get package %s from cache') % pname)
+                    if pdep.is_installed:
+                        if len(version):
+                            if not apt_pkg.check_dep(pdep.installed.version, op, version):
+                                exit_with_error(_('For package %s building requires %s (version %s), '
+                                                  'but installed %s') % (pkgname, pname, version,
+                                                                         pdep.installed.version))
+                        logging.info(_('Package %s already installed') % pname)
+                        continue
+                    logging.info(_('Installing dependency %s ...') % pname)
+                    pdep.mark_install()
+                    cache.commit()
+                else:
+                    # Альтернативные зависимости
+                    install_alt_depends(cache, dep)
+            except Exception as e:
+                exit_with_error(e)
 
     @staticmethod
     def build_package(tmpdirpath, logdir, jobs, options):
@@ -550,50 +283,14 @@ class Debhelper:
                 exit_with_error(_('File \'%s\' does not exist') % src)
 
     @staticmethod
-    def compare_versions(left, operator, right):
-        command = 'dpkg --compare-versions %s \'%s\' %s' % (left, operator, right)
-        try:
-            Debhelper.run_command(command)
-        except CalledProcessError:
-            return False
-        return True
-
-    @staticmethod
-    def check_installed_package_version(package):
-        command = 'dpkg --list | grep %s | awk \'{print $2,$3}\'' % package.name
-        try:
-            output = Debhelper.run_command_with_output(command)
-        except CalledProcessError:
-            exit_with_error(_('Could not get information for package \'%s\'') % package.name)
-        installed_package_version = None
-        arch = None
-        for line in output.split('\n'):
-            try:
-                pkgname, version = line.split(' ')
-                if ':' in pkgname:
-                    pkgname, arch = pkgname.split(':')
-            except Exception as e:
-                exit_with_error(e)
-            if pkgname == package.name and (arch is None or arch == CURRENT_ARCH):
-                installed_package_version = version
-                break
-        # Если не установлен пакет, зависимость не установлена
-        if not installed_package_version:
-            return False
-        command = 'dpkg --compare-versions %s \'%s\' %s' % (installed_package_version,
-                                                            package.operator,
-                                                            package.version)
-        try:
-            Debhelper.run_command(command)
-        except CalledProcessError:
-            return False
-        return True
-
-    @staticmethod
-    def get_sources_filelist(conf, package):
-        candidate = package.versions[0]
-        package_name, package_ver = candidate.source_name, candidate.source_version
-        dscfilepath = '%s/%s_%s.dsc' % (conf.srcdirpath, package_name, package_ver)
+    def get_sources_filelist(conf, package=None, dscfile=None):
+        dscfilepath = str()
+        if package:
+            candidate = package.versions[0]
+            package_name, package_ver = candidate.source_name, candidate.source_version
+            dscfilepath = '%s/%s_%s.dsc' % (conf.srcdirpath, package_name, package_ver)
+        else:
+            dscfilepath = '%s/%s' % (conf.srcdirpath, dscfile)
         try:
             dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
         except apt_pkg.Error as e:
@@ -779,6 +476,9 @@ class Builder:
         self.__clean = clean
         self.__jobs = jobs
         self.__scenario = self.Scenario(scenario_path)
+        # apt init
+        apt_pkg.init()
+        apt_pkg.config.set('Acquire::AllowInsecureRepositories', 'true')
 
     def __make_clean(self):
         logging.info(_('Package cleaning before rebuilding...'))
@@ -807,11 +507,16 @@ class Builder:
                     ', '.join(versions)))
             # Определяем файлы для копирования
             try:
-                files = Debhelper.get_source_files_to_extract('%s/%s' % (self.__conf.srcdirpath, dsc_files[0]))
+                files = Debhelper.get_sources_filelist(self.__conf, dscfile=dsc_files[0])
             except IndexError:
                 exit_with_error(_('Failed determine files to copy \'%s\'') % package_data.name)
             # Копируем файлы во временную директорию
-            Debhelper.copy_files(self.__conf.srcdirpath, tmpdirpath, files)
+            for file in files:
+                dst = os.path.join(tmpdirpath, basename(file))
+                try:
+                    copyfile(file, dst)
+                except Exception as e:
+                    exit_with_error(e)
 
         def copy_debs_files_to_repodir(package_data):
             version = package_data.version
@@ -1006,7 +711,7 @@ class RepoMaker:
                 package = p[1]
                 if package.name in sources.keys():
                     continue
-                package_sources = Debhelper.get_sources_filelist(self.__conf, package)
+                package_sources = Debhelper.get_sources_filelist(self.__conf, package=package)
                 sources[package.name] = package_sources
             files_to_copy = set([p[1].versions[0].filename for p in target_deps])
             target_builded_deps.update(files_to_copy)
