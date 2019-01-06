@@ -30,7 +30,7 @@ DSC_RE = '^%s_(?P<version>[\w\.\-\~\+]+)\.dsc$'
 STANDART_BUILD_OPTIONS_TEMPLATE = 'DEB_BUILD_OPTIONS="nocheck parallel=%d"'
 DPKG_IGNORED_CODES = [1]
 
-REQUIRED_PACKAGES = ['dpkg-dev', 'fakeroot']
+REQUIRED_PACKAGES = ['dpkg-dev', 'fakeroot', 'reprepro']
 
 BUILD_USER = 'builder'
 
@@ -513,6 +513,7 @@ class Builder(BaseCommand):
                 dst = os.path.join(tmpdirpath, os.path.basename(file))
                 try:
                     shutil.copyfile(file, dst)
+                    shutil.chown(dst, user=BUILD_USER, group=BUILD_USER)
                 except Exception as e:
                     exit_with_error(e)
 
