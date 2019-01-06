@@ -610,7 +610,7 @@ class RepoMaker(BaseCommand):
             disk_directory = os.path.join(self.__directory, '.disk')
             if not os.path.exists(disk_directory):
                 os.mkdir(disk_directory)
-            with open(os.path.join(disk_directory, 'label'), mode='w') as fp:
+            with open(os.path.join(disk_directory, 'info'), mode='w') as fp:
                 fp.write('%s %s (%s) - %s DVD\n' % ('%s-devel' % self.__name
                                                     if self.__is_dev else self.__name,
                                                     self.__version,
