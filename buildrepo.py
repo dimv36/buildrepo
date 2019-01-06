@@ -563,10 +563,8 @@ class Builder(BaseCommand):
 class PackageType:
     (PACKAGE_FROM_OS_REPO,
      PACKAGE_FROM_OS_DEV_REPO,
-     PACKAGE_FROM_TARGET_REPO,
-     PACKAGE_FROM_TARGET_DEV_REPO,
      PACKAGE_BUILDED,
-     PACKAGE_NOT_FOUND) = range(0, 6)
+     PACKAGE_NOT_FOUND) = range(0, 4)
 
 
 class RepoMaker(BaseCommand):
