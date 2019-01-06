@@ -14,6 +14,9 @@ import shutil
 import argparse
 import subprocess
 import tempfile
+import platform
+import atexit
+import datetime
 
 CURDIR = os.path.abspath(os.path.curdir)
 DEFAULT_REPO_DIR = os.path.abspath('%s/../build' % CURDIR)
@@ -30,7 +33,7 @@ DSC_RE = '^%s_(?P<version>[\w\.\-\~\+]+)\.dsc$'
 STANDART_BUILD_OPTIONS_TEMPLATE = 'DEB_BUILD_OPTIONS="nocheck parallel=%d"'
 DPKG_IGNORED_CODES = [1]
 
-REQUIRED_PACKAGES = ['dpkg-dev', 'fakeroot', 'reprepro']
+REQUIRED_PACKAGES = ['dpkg-dev', 'fakeroot', 'reprepro', 'genisoimage']
 
 BUILD_USER = 'builder'
 
@@ -124,17 +127,17 @@ class Debhelper:
             Debhelper.run_command(command)
         except subprocess.CalledProcessError as error:
             if not ignore_errors:
-                exit_with_error(_('Error package list generation by command \'%s\'') % command, error)
+                exit_with_error(_('Error package list generation by command %s') % command, error)
         # Вызываем apt-get update
         command = 'apt-get update'
         try:
             Debhelper.run_command(command)
         except subprocess.CalledProcessError as error:
             if not ignore_errors:
-                exit_with_error(_('Error updating package list by command \'%s\'' % command))
+                exit_with_error(_('Error updating package list by command %s' % command))
         finally:
             os.chdir(CURDIR)
-        logging.info(_('Repository \'%s\' was updated') % repo_name)
+        logging.info(_('Repository %s was updated') % repo_name)
 
     @staticmethod
     def extract_sources(tmpdirpath, package_name):
@@ -144,7 +147,7 @@ class Debhelper:
         try:
             Debhelper.run_command(command)
         except subprocess.CalledProcessError as error:
-            exit_with_error(_('Error unpacking sources with command \'%s\': %s') % (command, error))
+            exit_with_error(_('Error unpacking sources with command %s: %s') % (command, error))
         finally:
             os.chdir(CURDIR)
 
@@ -234,7 +237,7 @@ class Debhelper:
         returncode = proc.returncode
         if returncode:
             if returncode not in DPKG_IGNORED_CODES:
-                exit_with_error(_('Package \'%s\' building is failed: Command \'%s\' return exit code %d') % (
+                exit_with_error(_('Package %s building is failed: Command %s return exit code %d') % (
                     os.path.basename(dirpath),
                     command,
                     returncode))
@@ -262,11 +265,11 @@ class Debhelper:
         for f in files:
             src = '%s/%s' % (srcdir, f)
             dst = '%s/%s' % (dstdir, f)
-            logging.debug(_('Copying file \'%s\' to \'%s\'') % (src, dst))
+            logging.debug(_('Copying file %s to %s') % (src, dst))
             try:
                 shutil.copyfile(src, dst)
             except IOError:
-                exit_with_error(_('File \'%s\' does not exist') % src)
+                exit_with_error(_('File %s does not exist') % src)
 
     @staticmethod
     def get_sources_filelist(conf, package=None, dscfile=None):
@@ -294,10 +297,13 @@ class TemporaryDirManager(object):
         self.__dirs = []
         self.__prefix = prefix
 
-    def __del__(self):
-        for d in self.__dirs:
-            if os.path.exists(d):
-                shutil.rmtree(d)
+    # def __del__(self):
+    #     for d in self.__dirs:
+    #         if os.path.exists(d):
+    #             shutil.rmtree(d)
+
+    def dirs(self):
+        return self.__dirs
 
     def create(self):
         directory = tempfile.mkdtemp(prefix=self.__prefix)
@@ -322,6 +328,7 @@ class Configuration:
         self.fsrcdirpath = '%s/fsrc' % root
         self.frepodirpath = '%s/frepo' % root
         self.frepodevdirpath = '%s/frepodev' % root
+        self.isodirpath = '%s/iso' % root
         self.packageslistpath = '%s/packageslist.txt' % self.datadirpath
 
     @staticmethod
@@ -368,7 +375,8 @@ class RepoInitializer(BaseCommand):
         for _directory in [self._conf.srcdirpath, self._conf.datadirpath,
                            self._conf.repodirpath, self._conf.logdirpath,
                            self._conf.cachedirpath, self._conf.fsrcdirpath,
-                           self._conf.frepodirpath, self._conf.frepodevdirpath]:
+                           self._conf.frepodirpath, self._conf.frepodevdirpath,
+                           self._conf.isodirpath]:
             make_dir(_directory)
 
     def __init_packages_list(self):
@@ -562,6 +570,79 @@ class PackageType:
 
 
 class RepoMaker(BaseCommand):
+    class IsoRepositoryMaker:
+        def __init__(self, name, version, is_dev):
+            self.__directory = tmpdirmanager.create()
+            self.__name = name
+            self.__version = version
+            self.__version = version
+            self.__is_dev = is_dev
+            self.__base_init()
+
+        def __get_arch(self):
+            if platform.machine() == 'x86_64':
+                return 'amd64'
+            exit_with_error('Unexpected machine: %s' % platform.machine())
+
+        def __get_codename(self):
+            release = Debhelper.run_command_with_output('lsb_release -c -s')
+            return release
+
+        def __base_init(self):
+            conf_directory = os.path.join(self.__directory, 'conf')
+            if not os.path.exists(conf_directory):
+                os.mkdir(conf_directory)
+            with open(os.path.join(conf_directory, 'distributions'), mode='w') as fp:
+                fp.write('Codename: %s\n' % self.__name)
+                fp.write('Version: %s\n' % self.__version)
+                fp.write('Description: %s repository\n' % self.__name)
+                fp.write('Architectures: %s\n' % self.__get_arch())
+                fp.writelines(['Components: main contrib non-free\n',
+                               'DebIndices: Packages Release . .gz .bz2\n',
+                               'Contents: . .gz .bz2\n'])
+            try:
+                os.chdir(self.__directory)
+                Debhelper.run_command('reprepro export')
+            except subprocess.CalledProcessError:
+                exit_with_error(_('Reprepro initialization failed'))
+            finally:
+                os.chdir(CURDIR)
+            disk_directory = os.path.join(self.__directory, '.disk')
+            if not os.path.exists(disk_directory):
+                os.mkdir(disk_directory)
+            with open(os.path.join(disk_directory, 'label'), mode='w') as fp:
+                fp.write('%s %s (%s) - %s DVD\n' % ('%s-devel' % self.__name
+                                                    if self.__is_dev else self.__name,
+                                                    self.__version,
+                                                    self.__get_codename(),
+                                                    self.__get_arch()))
+
+        def mkiso(self, conf):
+            try:
+                os.chdir(self.__directory)
+                logging.info(_('Creating repository for %s via reprepro ...') % (
+                             '%s-dev' % self.__name if self.__is_dev else self.__name))
+                packagedir = conf.frepodevdirpath if self.__is_dev else conf.frepodirpath
+                Debhelper.run_command('reprepro includedeb %s %s/*.deb' % (self.__name, packagedir))
+                # Удаление ненужных директорий
+                for directory in ['db', 'conf']:
+                    shutil.rmtree(directory)
+                now = datetime.datetime.now().strftime('%Y-%m-%d')
+                isoname = '%s_%s_%s.iso' % (self.__name, self.__version, now)
+                if self.__is_dev:
+                    isoname = 'devel-%s' % isoname
+                isopath = os.path.join(conf.isodirpath, isoname)
+                label = '%s %s (%s) %s' % (self.__name, self.__version, self.__get_codename(), self.__get_arch())
+                os.chdir(os.path.join(self.__directory, '..'))
+                logging.info(_('Building iso %s for %s ...') % (isopath, self.__name))
+                Debhelper.run_command('genisoimage -r -J -o %s -V "%s" %s' % (isopath,
+                                                                              label,
+                                                                              self.__directory))
+            except Exception as e:
+                exit_with_error(_('Failed to make iso: %s') % e)
+            finally:
+                os.chdir(CURDIR)
+
     class DependencyFinder:
         def __init__(self, package, caches):
             self.deps = list()
@@ -596,13 +677,16 @@ class RepoMaker(BaseCommand):
                         s.append(item)
                         self.__deps_recurse(s, package)
 
-    def __init__(self, repodirpath, white_list_path):
+    def __init__(self, repodirpath, white_list_path, no_create_iso):
         super().__init__(repodirpath)
         if not os.path.exists(white_list_path):
-            exit_with_error(_('File \'%s\' does not exist') % white_list_path)
+            exit_with_error(_('File %s does not exist') % white_list_path)
         self.__white_list = white_list_path
+        self.__no_create_iso = no_create_iso
         self.__packages = {}
         self.__caches = []
+        self.__name = None
+        self.__version = None
         self.__build_cache_of_builded_packages()
         self.__load_caches()
         self.__parse_white_list()
@@ -612,7 +696,16 @@ class RepoMaker(BaseCommand):
         last_section = None
         for line in open(self.__white_list, mode='r').readlines():
             i += 1
-            if line.startswith('#') or line == '\n':
+            m = re.match(r'#\s?(?P<key>\w+)\s?:\s?(?P<value>[\w.\-]+)', line)
+            if m:
+                try:
+                    setattr(self, '_%s__%s' % (self.__class__.__name__,
+                                               m.group('key')), m.group('value'))
+                    continue
+                except AttributeError:
+                    exit_with_error(_('Unexpected key %s in white list %s') % (m.group('key'),
+                                                                               self.__white_list))
+            elif line.startswith('#') or line == '\n':
                 continue
             line = line.rstrip('\n')
             if line.startswith('[') and line.endswith(']'):
@@ -630,6 +723,9 @@ class RepoMaker(BaseCommand):
                 self.__packages[last_section] = packages
         if 'target' not in self.__packages:
             exit_with_error(_('White list for target repository is empty'))
+        # Проверка на наличие полей name и version
+        if self.__name is None or self.__version is None:
+            exit_with_error(_('Name and version fields are required'))
         # Проверка на пересечение
         all_pkgs = set()
         for section, packages in self.__packages.items():
@@ -708,7 +804,7 @@ class RepoMaker(BaseCommand):
                 sources[package.name] = package_sources
             files_to_copy = set([p[1].versions[0].filename for p in target_deps])
             target_builded_deps.update(files_to_copy)
-            logging.debug(_('Copying dependencies for package \'%s\': %s') % (required, files_to_copy))
+            logging.debug(_('Copying dependencies for package %s: %s') % (required, files_to_copy))
             for f in files_to_copy:
                 src = os.path.join(self._conf.root, f)
                 dst = os.path.join(self._conf.frepodirpath, os.path.basename(f))
@@ -760,6 +856,7 @@ class RepoMaker(BaseCommand):
                     shutil.copyfile(src, dst)
                 except Exception as e:
                     exit_with_error(e)
+        # Копируем исходники для разрешенных репозиториев
         for package_name, sourcelist in sources.items():
             logging.info(_('Copying sources for package %s ...') % package_name)
             for source in sourcelist:
@@ -769,6 +866,12 @@ class RepoMaker(BaseCommand):
                     shutil.copyfile(source, dst)
                 except Exception as e:
                     exit_with_error(e)
+        if self.__no_create_iso:
+            return
+        # Создаем репозиторий (main)
+        for is_dev in (False, True):
+            iso_maker = self.IsoRepositoryMaker(self.__name, self.__version, is_dev)
+            iso_maker.mkiso(self._conf)
 
 
 class PackageCacheMaker(BaseCommand):
@@ -850,6 +953,9 @@ if __name__ == '__main__':
     parser_make_repo = make_default_subparser(subparsers, COMMAND_MAKE_REPO)
     parser_make_repo.add_argument('--white-list', required=True,
                                   help=_('Set path to white list'))
+    parser_make_repo.add_argument('--no-create-iso', required=False, action='store_true',
+                                  help=_('Skip iso creation after binary depends resolving, default: False'))
+
     # make package cache parser
     parser_make_cache = make_default_subparser(subparsers, COMMAND_MAKE_PACKAGE_CACHE)
     parser_make_cache.add_argument('--mount-path', required=True,
@@ -870,6 +976,12 @@ if __name__ == '__main__':
     # Проверяем наличие прав суперпользователя
     check_root_access()
     try:
+        def rm_tmp_dirs():
+            for directory in tmpdirmanager.dirs():
+                if os.path.exists(directory):
+                    shutil.rmtree(directory)
+
+        atexit.register(rm_tmp_dirs)
         if args.command == COMMAND_INIT:
             initializer = RepoInitializer(root)
             initializer.run()
@@ -877,7 +989,7 @@ if __name__ == '__main__':
             builder = Builder(root, os.path.abspath(args.source_list), args.clean, args.jobs)
             builder.run()
         elif args.command == COMMAND_MAKE_REPO:
-            repomaker = RepoMaker(root, os.path.abspath(args.white_list))
+            repomaker = RepoMaker(root, os.path.abspath(args.white_list), args.no_create_iso)
             repomaker.run()
         elif args.command == COMMAND_MAKE_PACKAGE_CACHE:
             cache_type = PackageType.PACKAGE_FROM_OS_REPO if args.primary else PackageType.PACKAGE_FROM_OS_DEV_REPO
