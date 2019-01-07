@@ -887,7 +887,7 @@ class RepoMaker(BaseCommand):
             isoname = 'sources-%s_%s_%s.iso' % (self.__name, self.__version, now)
             isopath = os.path.join(self._conf.isodirpath, isoname)
             label = '%s %s (sources)' % (self.__name, self.__version)
-            logging.info(_('Building sorces iso %s for %s ...') % (isopath, self.__name))
+            logging.info(_('Building sources iso %s for %s ...') % (isopath, self.__name))
             Debhelper.run_command('genisoimage -r -J -o %s -V "%s" %s' % (isopath,
                                                                           label,
                                                                           tmpdir))
