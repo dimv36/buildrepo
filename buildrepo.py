@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+import sys
 import logging
 import re
 import json
@@ -866,10 +867,34 @@ class RepoMaker(BaseCommand):
                     exit_with_error(e)
         if self.__no_create_iso:
             return
-        # Создаем репозиторий (main)
+        # Создаем репозиторий (main и dev)
         for is_dev in (False, True):
             iso_maker = self.IsoRepositoryMaker(self.__name, self.__version, is_dev)
             iso_maker.mkiso(self._conf)
+        # Формируем образ диска с исходниками
+        tmpdir = tmpdirmanager.create()
+        try:
+            # Копируем исходники
+            shutil.copytree(self._conf.fsrcdirpath, os.path.join(tmpdir, 'src'))
+            # Копируем списки и текущий скрипт
+            script_dir = os.path.dirname(sys.argv[0])
+            for file in os.listdir(script_dir):
+                if os.path.isfile(file):
+                    shutil.copyfile(os.path.join(script_dir, file),
+                                    os.path.join(tmpdir, file))
+            os.chdir(os.path.join(tmpdir, '..'))
+            now = datetime.datetime.now().strftime('%Y-%m-%d')
+            isoname = 'sources-%s_%s_%s.iso' % (self.__name, self.__version, now)
+            isopath = os.path.join(self._conf.isodirpath, isoname)
+            label = '%s %s (sources)' % (self.__name, self.__version)
+            logging.info(_('Building sorces iso %s for %s ...') % (isopath, self.__name))
+            Debhelper.run_command('genisoimage -r -J -o %s -V "%s" %s' % (isopath,
+                                                                          label,
+                                                                          tmpdir))
+        except Exception as e:
+            exit_with_error(_('Failed to create source iso: %s') % e)
+        finally:
+            os.chdir(CURDIR)
 
 
 class PackageCacheMaker(BaseCommand):
