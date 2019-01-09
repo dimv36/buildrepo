@@ -290,7 +290,7 @@ class Debhelper:
             exit_with_error(e)
         filelist = ['%s/%s' % (conf.srcdirpath, f) for f in dscfile.filelist]
         filelist = [dscfilepath] + filelist
-        return filelist
+        return tuple(item for item in filelist)
 
 
 class TemporaryDirManager(object):
@@ -357,6 +357,9 @@ class Configuration:
         formatter = logging.Formatter('%(levelname)-8s: %(message)s')
         console.setFormatter(formatter)
         logging.getLogger('').addHandler(console)
+        logging.info('*****' * 6)
+        logging.info(_('Running %s ...') % ' '.join(sys.argv))
+        logging.info('*****' * 6)
 
 
 class BaseCommand(object):
@@ -698,6 +701,7 @@ class RepoMaker(BaseCommand):
         self.__caches = []
         self.__name = None
         self.__version = None
+        self.__sources = {}
         self.__build_cache_of_builded_packages()
         self.__load_caches()
         self.__parse_white_list()
@@ -868,12 +872,19 @@ class RepoMaker(BaseCommand):
                 except Exception as e:
                     exit_with_error(e)
         # Копируем исходники для разрешенных репозиториев
-        for package_name, sourcelist in sources.items():
-            logging.info(_('Copying sources for package %s ...') % package_name)
+        # Обращаем ключи словаря
+        reversed_sources = {}
+        for key, value in sources.items():
+            if value not in reversed_sources.keys():
+                reversed_sources[value] = [key]
+            else:
+                reversed_sources[value].append(key)
+        for sourcelist, packages in reversed_sources.items():
+            logging.info(_('Copying sources for package(s) %s ...') % ', '.join(packages))
             for source in sourcelist:
                 dst = os.path.join(self._conf.fsrcdirpath, os.path.basename(source))
                 try:
-                    logging.debug(_('Copying %s to %s') % (src, dst))
+                    logging.debug(_('Copying %s to %s') % (source, dst))
                     shutil.copyfile(source, dst)
                 except Exception as e:
                     exit_with_error(e)
