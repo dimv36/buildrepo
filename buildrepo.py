@@ -348,8 +348,8 @@ class Configuration:
         if not os.path.exists(root):
             os.mkdir(root)
         logging.basicConfig(level=logging.DEBUG,
-                            format='%(asctime)s %(name)-12s %(message)s',
-                            datefmt='%m-%d %H:%M',
+                            format='%(asctime)-8s %(levelname)-8s %(message)s',
+                            datefmt='%Y-%m-%d %H:%M:%S',
                             filename='%s/buildrepo.log' % root,
                             filemode='a')
         console = logging.StreamHandler()
@@ -552,7 +552,6 @@ class Builder(BaseCommand):
         for package_data in self.__scenario.packages:
             tmpdirpath = tmpdirmanager.create()
             Debhelper.run_command('chown -R %s.%s %s' % (BUILD_USER, BUILD_USER, tmpdirpath))
-            logging.debug(_('Creating temparary directory %s') % tmpdirpath)
             # Копируем исходники из src во временную директорию
             copy_files_to_builddir(package_data, tmpdirpath)
             # Распаковываем пакет
