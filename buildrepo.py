@@ -661,17 +661,19 @@ class RepoMaker(BaseCommand):
             if self.__package is None:
                 exit_with_error(_('Package %s does not exists') % package)
             self.deps.append((self.__package.name, self.__package,
-                              self.__get_package_repository(self.__package)))
+                              self.__get_package_repository(self.__package, self.__package.name)))
             self.__deps_recurse(self.deps, self.__package)
 
-        def __get_package_repository(self, package):
+        def __get_package_repository(self, package, required_by):
             package_name, package_ver = package.name, package.versions[0].version
             for cache in self.__caches:
                 cache_name = cache[DIRECTIVE_CACHE_NAME]
                 for p in cache[DIRECTIVE_CACHE_PACKAGES]:
                     if p['name'] == package_name and p['version'] == package_ver:
-                        logging.debug(_('Package %s(%s) founded in %s repo') % (package_name,
-                                                                                package_ver, cache_name))
+                        logging.debug(_('%s -> %s(%s) found in %s repo') % (required_by,
+                                                                            package_name,
+                                                                            package_ver,
+                                                                            cache_name))
                         return cache[DIRECTIVE_CACHE_TYPE]
 
         def __deps_recurse(self, s, p):
@@ -682,7 +684,7 @@ class RepoMaker(BaseCommand):
                 dp = i.target_versions
                 if len(dp) > 0:
                     package = dp[0].package
-                    item = (p.name, package, self.__get_package_repository(package))
+                    item = (p.name, package, self.__get_package_repository(package, p.name))
                     if item not in s:
                         s.append(item)
                         self.__deps_recurse(s, package)
