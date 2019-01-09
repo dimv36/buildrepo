@@ -298,11 +298,6 @@ class TemporaryDirManager(object):
         self.__dirs = []
         self.__prefix = prefix
 
-    # def __del__(self):
-    #     for d in self.__dirs:
-    #         if os.path.exists(d):
-    #             shutil.rmtree(d)
-
     def dirs(self):
         return self.__dirs
 
@@ -321,16 +316,32 @@ tmpdirmanager = TemporaryDirManager()
 class Configuration:
     def __init__(self, root):
         self.root = root
-        self.srcdirpath = '%s/src' % root
-        self.repodirpath = '%s/repo' % root
-        self.datadirpath = '%s/data' % root
-        self.logdirpath = '%s/logs' % root
-        self.cachedirpath = '%s/cache' % root
-        self.fsrcdirpath = '%s/fsrc' % root
-        self.frepodirpath = '%s/frepo' % root
-        self.frepodevdirpath = '%s/frepodev' % root
-        self.isodirpath = '%s/iso' % root
-        self.packageslistpath = '%s/packageslist.txt' % self.datadirpath
+        self.srcdirpath = os.path.join(root, 'src')
+        self.repodirpath = os.path.join(root, 'repo')
+        self.datadirpath = os.path.join(root, 'data')
+        self.logdirpath = os.path.join(root, 'logs')
+        self.cachedirpath = os.path.join(root, 'cache')
+        self.fsrcdirpath = os.path.join(root, 'fsrc')
+        self.frepodirpath = os.path.join(root, 'frepo')
+        self.frepodevdirpath = os.path.join(root, 'frepodev')
+        self.isodirpath = os.path.join(root, 'iso')
+        self.packageslistpath = os.path.join(self.datadirpath, 'packageslist.txt')
+        self.__base_init()
+
+    def __base_init(self):
+        if not os.path.exists(self.root):
+            os.mkdir(self.root)
+        for directory in [self.srcdirpath, self.repodirpath,
+                          self.datadirpath, self.logdirpath,
+                          self.cachedirpath, self.fsrcdirpath,
+                          self.frepodirpath, self.frepodevdirpath,
+                          self.isodirpath]:
+            if not os.path.exists(directory):
+                try:
+                    logging.debug(_('Creating directory %s ...') % directory)
+                    os.mkdir(directory)
+                except Exception as e:
+                    exit_with_error(_('Failed to create directory %s: %s') % (directory, e))
 
     @staticmethod
     def init_logger(root):
