@@ -32,7 +32,7 @@ DEB_RE = '^(?P<name>[\w\-\.]+)_(?P<version>[\w\.\-\~\+]+)_(?P<arch>[\w]+)\.deb$'
 DSC_FULL_RE = '^(?P<name>[\w\-\.\+]+)_(?P<version>[\w\.\-\~\+]+)\.dsc$'
 DSC_RE = '^%s_(?P<version>[\w\.\-\~\+]+)\.dsc$'
 STANDART_BUILD_OPTIONS_TEMPLATE = 'DEB_BUILD_OPTIONS="nocheck parallel=%d"'
-DPKG_IGNORED_CODES = [1]
+DPKG_IGNORED_CODES = [1, 25]
 
 REQUIRED_PACKAGES = ['dpkg-dev', 'fakeroot', 'reprepro', 'genisoimage']
 
@@ -130,7 +130,7 @@ class Debhelper:
                     logging.info(_('Installing required package %s ...') % pname)
                     package.mark_install()
                     cache.commit()
-                    c.clear()
+                    cache.clear()
                 except Exception as e:
                     exit_with_error(_('Failed to install required package %s: %s') % (pname, e))
         # Проверяем наличие учетной записи пользователя,
@@ -168,6 +168,7 @@ class Debhelper:
                 exit_with_error(_('Error updating package list by command %s' % command))
         finally:
             os.chdir(CURDIR)
+        cache.open()
         logging.info(_('Repository %s was updated') % repo_name)
 
     @staticmethod
@@ -209,6 +210,10 @@ class Debhelper:
                     pdep.mark_install()
                     cache.commit()
                     cache.clear()
+                    cache.open()
+                    installed_dep = cache.get(pname)
+                    if not installed_dep:
+                        exit_with_error(_('Failed to install package %s') % pname)
                     return
                 except apt_pkg.Error:
                     continue
@@ -220,8 +225,8 @@ class Debhelper:
         except AttributeError:
             exit_with_error(_('dsc file does not exist'))
         dscfile = apt.debfile.DscSrcPackage(filename=os.path.join(tmpdirpath, dscfilepath))
-        cache.update()
         # TODO: Проверить по конфликтам
+        print(dscfile.depends)
         for dep in dscfile.depends:
             # Обыкновенная зависимость
             try:
@@ -229,7 +234,12 @@ class Debhelper:
                     pname, version, op = dep[0]
                     pdep = cache.get(pname)
                     if pdep is None:
-                        exit_with_error(_('Failed to get package %s from cache') % pname)
+                        # Виртуальный пакет?
+                        providing = cache.get_providing_packages(pname)
+                        if not len(providing):
+                            exit_with_error(_('Failed to get package %s from cache') % pname)
+                        pdep = providing[0]
+                        logging.info(_('Package %s is virtual, provided by %s ...') % (pname, pdep.name))
                     if pdep.is_installed:
                         if len(version):
                             if not apt_pkg.check_dep(pdep.installed.version, op, version):
@@ -242,9 +252,13 @@ class Debhelper:
                     pdep.mark_install()
                     cache.commit()
                     cache.clear()
+                    cache.open()
+                    installed_dep = cache.get(pname)
+                    if not installed_dep:
+                        exit_with_error(_('Failed to install package %s') % pname)
                 else:
                     # Альтернативные зависимости
-                    install_alt_depends(cache, dep)
+                    install_alt_depends(dep)
             except Exception as e:
                 exit_with_error(e)
 
@@ -599,6 +613,8 @@ class Builder(BaseCommand):
             Debhelper.copy_debs(tmpdirpath, self._conf.repodirpath)
             # Обновляем репозиторий
             Debhelper.generate_packages_list(self._conf.repodirpath)
+            # Обновляем кэш
+            cache.update()
 
     def run(self):
         if self.__clean:
