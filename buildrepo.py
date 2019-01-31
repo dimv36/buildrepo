@@ -73,6 +73,34 @@ def fix_re(reg_exp):
     return reg_exp
 
 
+class PackageManager:
+    def __init__(self):
+        apt_pkg.init()
+        self.cache = apt_pkg.Cache()
+        self.sources = apt_pkg.SourceList()
+        self.pkg_records = apt_pkg.PackageRecords(self.cache)
+        self.depcache = apt_pkg.DepCache(self.cache)
+        self.pkg_manager = apt_pkg.PackageManager(self.depcache)
+        self.fetcher = apt_pkg.Acquire()
+
+        def install_package(self, pkg):
+            self.depcache.mark_install(pkg)
+            self.sources.read_main_list()
+            self.pkg_manager.get_archives(self.fetcher, self.sources,
+                                          self.pkg_records)
+            log_file = open('install_log', 'w')
+            res = self.pkg_manager.do_install(log_file.fileno())
+
+            if res == self.pkg_manager.RESULT_COMPLETED:
+                print('result completed!')
+            elif res == self.pkg_manager.RESULT_INCOMPLETE:
+                print('result incomplete!')
+            else:
+                print('result failed!')
+
+pmanager = PackageManager()
+
+
 class Debhelper:
     """
     Класс для запуска Debian утилит
@@ -91,16 +119,18 @@ class Debhelper:
 
     @staticmethod
     def base_init():
+        global cache
         # Проверяем пакеты, которые должны быть уже установлены
         for pname in REQUIRED_PACKAGES:
             package = cache.get(pname)
             if not package:
                 exit_with_error(_('Could not get package %s from cache') % pname)
-            if not package.installed:
+            if not package.is_installed:
                 try:
                     logging.info(_('Installing required package %s ...') % pname)
                     package.mark_install()
                     cache.commit()
+                    c.clear()
                 except Exception as e:
                     exit_with_error(_('Failed to install required package %s: %s') % (pname, e))
         # Проверяем наличие учетной записи пользователя,
@@ -161,7 +191,7 @@ class Debhelper:
 
     @staticmethod
     def install_build_depends(tmpdirpath, pkgname):
-        def install_alt_depends(cache, depends):
+        def install_alt_depends(depends):
             depstr = ' | '.join([' '.join([p[0], '(', p[2], p[1], ')'])
                                 if len(p[1]) else p[0] for p in depends])
             for alt in depends:
@@ -178,6 +208,7 @@ class Debhelper:
                 try:
                     pdep.mark_install()
                     cache.commit()
+                    cache.clear()
                     return
                 except apt_pkg.Error:
                     continue
@@ -210,6 +241,7 @@ class Debhelper:
                     logging.info(_('Installing dependency %s ...') % pname)
                     pdep.mark_install()
                     cache.commit()
+                    cache.clear()
                 else:
                     # Альтернативные зависимости
                     install_alt_depends(cache, dep)
