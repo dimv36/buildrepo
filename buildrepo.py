@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import platform
 import atexit
+import time
 import datetime
 
 CURDIR = os.path.abspath(os.path.curdir)
@@ -208,7 +209,7 @@ class Debhelper:
         def form_depends(depends):
             depstrings = []
             for dep in depends:
-                depstr = ' | '.join([' '.join([p[0], '(', p[2], p[1], ')'])
+                depstr = ' | '.join(['%s (%s %s)' % (p[0], p[2], p[1])
                                     if len(p[1]) else p[0] for p in dep])
                 depstrings.append(depstr)
             return ', '.join(depstrings)
@@ -256,10 +257,13 @@ class Debhelper:
         except OSError as e:
             exit_with_error(_('Error opening logfile: %s') % e)
         logstream.write('\n\nCommand: %s' % command)
+        start = datetime.datetime.now()
         proc = subprocess.Popen(command, stdout=logstream, stderr=logstream,
                                 universal_newlines=True, shell=True)
         proc.communicate()
+        end = datetime.datetime.now() - start
         logstream.write('\nReturncode: %d' % proc.returncode)
+        logstream.write('\nBuilding time: %s\n' % time.strftime('%H:%M:%S', time.gmtime(end.seconds)))
         logstream.close()
         returncode = proc.returncode
         if returncode:
