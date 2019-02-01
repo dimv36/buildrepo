@@ -73,34 +73,6 @@ def fix_re(reg_exp):
     return reg_exp
 
 
-class PackageManager:
-    def __init__(self):
-        apt_pkg.init()
-        self.cache = apt_pkg.Cache()
-        self.sources = apt_pkg.SourceList()
-        self.pkg_records = apt_pkg.PackageRecords(self.cache)
-        self.depcache = apt_pkg.DepCache(self.cache)
-        self.pkg_manager = apt_pkg.PackageManager(self.depcache)
-        self.fetcher = apt_pkg.Acquire()
-
-        def install_package(self, pkg):
-            self.depcache.mark_install(pkg)
-            self.sources.read_main_list()
-            self.pkg_manager.get_archives(self.fetcher, self.sources,
-                                          self.pkg_records)
-            log_file = open('install_log', 'w')
-            res = self.pkg_manager.do_install(log_file.fileno())
-
-            if res == self.pkg_manager.RESULT_COMPLETED:
-                print('result completed!')
-            elif res == self.pkg_manager.RESULT_INCOMPLETE:
-                print('result incomplete!')
-            else:
-                print('result failed!')
-
-pmanager = PackageManager()
-
-
 class Debhelper:
     """
     Класс для запуска Debian утилит
@@ -192,33 +164,54 @@ class Debhelper:
 
     @staticmethod
     def install_build_depends(tmpdirpath, pkgname):
-        def install_alt_depends(depends):
-            depstr = ' | '.join([' '.join([p[0], '(', p[2], p[1], ')'])
-                                if len(p[1]) else p[0] for p in depends])
-            for alt in depends:
-                pname, version, op = alt
-                pdep = cache.get(pname)
-                if pdep is None:
-                    exit_with_error(_('Failed to get package %s from cache') % pname)
+        def install_package_or_providing(ptuple, builded_package):
+            pname, version, op = ptuple
+            real_pkg = cache.get(pname)
+            if not real_pkg:
+                packages = cache.get_providing_packages(pname)
+            else:
+                packages = [real_pkg]
+            if not len(packages):
+                exit_with_error(_('Failed to get package %s from cache') % pname)
+            for pdep in packages:
                 if pdep.is_installed:
                     if len(version) and not apt_pkg.check_dep(pdep.installed.version, op, version):
                         continue
                     logging.info(_('Package %s already installed') % pname)
-                    return
-                logging.info(_('Installing dependency %s ...') % pname)
+                    return True, None
+                if cache.is_virtual_package(pdep.name):
+                    logging.info(_('Package %s is virtual, provided by %s ...') % (pname, pdep.name))
+                logging.info(_('Installing dependency %s ...') % pdep.name)
                 try:
                     pdep.mark_install()
                     cache.commit()
-                    cache.clear()
-                    cache.open()
-                    installed_dep = cache.get(pname)
-                    if not installed_dep:
-                        exit_with_error(_('Failed to install package %s') % pname)
-                    return
                 except apt_pkg.Error:
-                    continue
-            # Формируем строку зависимостей
-            exit_with_error(_('Could not resolve alternative depends %s for package %s') % (depstr, pkgname))
+                    pass
+                finally:
+                    cache.open()
+                # Проверяем, установлен ли пакет
+                dep = [cache.get(pdep.name)] or cache.get_providing_packages(pdep.name, include_nonvirtual=True)
+                if not len(dep):
+                    return False, pdep.name
+                dep = dep[0]
+                if len(op) and len(version):
+                    req_version = apt_pkg.check_dep(dep.installed.version, op, version)
+                    if not req_version:
+                        logging.warning(_('For package %s building requires %s (version %s), '
+                                          'but installed %s') % (builded_package, pname, version,
+                                                                 pdep.installed.version))
+                    return req_version, pdep.name
+                return True, None
+            # Не должно дойти сюда
+            return False, None
+
+        def form_depends(depends):
+            depstrings = []
+            for dep in depends:
+                depstr = ' | '.join([' '.join([p[0], '(', p[2], p[1], ')'])
+                                    if len(p[1]) else p[0] for p in dep])
+                depstrings.append(depstr)
+            return ', '.join(depstrings)
 
         try:
             dscfilepath = next(f for f in os.listdir(tmpdirpath) if re.match(DSC_FULL_RE, f))
@@ -226,41 +219,28 @@ class Debhelper:
             exit_with_error(_('dsc file does not exist'))
         dscfile = apt.debfile.DscSrcPackage(filename=os.path.join(tmpdirpath, dscfilepath))
         # TODO: Проверить по конфликтам
-        print(dscfile.depends)
+        logging.info(_('Build depends for package %s: %s') % (pkgname, form_depends(dscfile.depends)))
         for dep in dscfile.depends:
-            # Обыкновенная зависимость
-            try:
-                if len(dep) == 1:
-                    pname, version, op = dep[0]
-                    pdep = cache.get(pname)
-                    if pdep is None:
-                        # Виртуальный пакет?
-                        providing = cache.get_providing_packages(pname)
-                        if not len(providing):
-                            exit_with_error(_('Failed to get package %s from cache') % pname)
-                        pdep = providing[0]
-                        logging.info(_('Package %s is virtual, provided by %s ...') % (pname, pdep.name))
-                    if pdep.is_installed:
-                        if len(version):
-                            if not apt_pkg.check_dep(pdep.installed.version, op, version):
-                                exit_with_error(_('For package %s building requires %s (version %s), '
-                                                  'but installed %s') % (pkgname, pname, version,
-                                                                         pdep.installed.version))
-                        logging.info(_('Package %s already installed') % pname)
-                        continue
-                    logging.info(_('Installing dependency %s ...') % pname)
-                    pdep.mark_install()
-                    cache.commit()
-                    cache.clear()
-                    cache.open()
-                    installed_dep = cache.get(pname)
-                    if not installed_dep:
-                        exit_with_error(_('Failed to install package %s') % pname)
-                else:
-                    # Альтернативные зависимости
-                    install_alt_depends(dep)
-            except Exception as e:
-                exit_with_error(e)
+            cache.open()
+            if len(dep) == 1:
+                # Обыкновенная зависимость
+                res, installed_package = install_package_or_providing(dep[0], pkgname)
+                if not res:
+                    exit_with_error(_('Failed to install package %s') % installed_package)
+            else:
+                # Альтернативные зависимости
+                alt_installed = False
+                depstr = ' | '.join([' '.join([p[0], '(', p[2], p[1], ')'])
+                                    if len(p[1]) else p[0] for p in dep])
+                logging.info(_('Processing alternative dependencies %s ...') % depstr)
+                for alt in dep:
+                    is_installed, installed_pkg = install_package_or_providing(alt, pkgname)
+                    alt_installed = alt_installed or is_installed
+                    if alt_installed:
+                        break
+                if not alt_installed:
+                    exit_with_error(_('Could not resolve alternative depends %s for package %s') % (
+                                    depstr, pkgname))
 
     @staticmethod
     def build_package(tmpdirpath, logdir, jobs, options):
