@@ -167,7 +167,7 @@ class Debhelper:
     def install_build_depends(tmpdirpath, pkgname):
         def install_package_or_providing(ptuple, builded_package):
             pname, version, op = ptuple
-            real_pkg = cache.get(pname)
+            real_pkg = cache.get(pname, None)
             if not real_pkg:
                 packages = cache.get_providing_packages(pname)
             else:
@@ -177,7 +177,10 @@ class Debhelper:
             for pdep in packages:
                 if pdep.is_installed:
                     if len(version) and not apt_pkg.check_dep(pdep.installed.version, op, version):
-                        continue
+                        logging.error(_('For package %s building %s (version %s) is required, '
+                                        'but installed %s') % (builded_package, pname, version,
+                                                               pdep.installed.version))
+                        return False, None
                     logging.info(_('Package %s already installed') % pname)
                     return True, None
                 if cache.is_virtual_package(pdep.name):
@@ -198,9 +201,9 @@ class Debhelper:
                 if len(op) and len(version):
                     req_version = apt_pkg.check_dep(dep.installed.version, op, version)
                     if not req_version:
-                        logging.warning(_('For package %s building requires %s (version %s), '
-                                          'but installed %s') % (builded_package, pname, version,
-                                                                 pdep.installed.version))
+                        logging.error(_('For package %s building %s (version %s) is required, '
+                                        'but installed %s') % (builded_package, pname, version,
+                                                               dep.installed.version))
                     return req_version, pdep.name
                 return True, None
             # Не должно дойти сюда
@@ -227,7 +230,8 @@ class Debhelper:
                 # Обыкновенная зависимость
                 res, installed_package = install_package_or_providing(dep[0], pkgname)
                 if not res:
-                    exit_with_error(_('Failed to install package %s') % installed_package)
+                    exit_with_error(_('Failed to install package %s') % installed_package
+                                    if installed_package else pkgname)
             else:
                 # Альтернативные зависимости
                 alt_installed = False
