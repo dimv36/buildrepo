@@ -228,7 +228,7 @@ class Debhelper:
                                         '%s') % (builded_package, pname, version,
                                                  installed_ver))
                     return req_version, pdep.name
-                return True, None
+                return True if dep.installed else False, dep.name
             # Не должно дойти сюда
             return False, None
 
@@ -253,8 +253,8 @@ class Debhelper:
                 # Обыкновенная зависимость
                 res, installed_package = install_package_or_providing(dep[0], pkgname)
                 if not res:
-                    exit_with_error(_('Failed to install package %s') % installed_package
-                                    if installed_package else pkgname)
+                    exit_with_error(_('Failed to install package %s') % (
+                                    installed_package if installed_package else pkgname))
             else:
                 # Альтернативные зависимости
                 alt_installed = False
