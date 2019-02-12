@@ -245,7 +245,21 @@ class Debhelper:
         except AttributeError:
             exit_with_error(_('dsc file does not exist'))
         dscfile = apt.debfile.DscSrcPackage(filename=os.path.join(tmpdirpath, dscfilepath))
-        # TODO: Проверить по конфликтам
+        # Проверка по конфиликтам
+        if len(dscfile.conflicts):
+            logging.info(_('Found Build conflicts for package %s: %s') % (pkgname, form_depends(dscfile.conflicts)))
+            for conflict in dscfile.conflicts:
+                c_name = conflict[0][0]
+                try:
+                    dep = cache.get(c_name)
+                    if not dep:
+                        continue
+                    dep.mark_delete()
+                    cache.commit()
+                except Exception as e:
+                    exit_with_error(e)
+                finally:
+                    cache.open()
         logging.info(_('Build depends for package %s: %s') % (pkgname, form_depends(dscfile.depends)))
         for dep in dscfile.depends:
             cache.open()
@@ -873,7 +887,8 @@ class RepoMaker(BaseCommand):
                 exit_with_error(_('Could not resolve dependencies'))
             if len(deps_in_dev):
                 for p in deps_in_dev:
-                    package_name, package_ver = p.name, p.versions[0].version
+                    pkg = p[1]
+                    package_name, package_ver = pkg.name, pkg.versions[0].version
                     logging.error(_('%s %s(%s) for %s is founded in os-dev repo') %
                                    ('Dependency' if p[0] == required else 'Subdependency',
                                     package_name, package_ver, p[0]))
