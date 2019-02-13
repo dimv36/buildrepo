@@ -858,6 +858,14 @@ class RepoMaker(BaseCommand):
         return depfinder.deps
 
     def run(self):
+        def get_deb_dev_to_copy(pkgs):
+            filenames = set()
+            for pkg in pkgs:
+                p = pkg[1]
+                if self._conf.repodirpath in p.versions[0].uris[0]:
+                    filenames.add(p.versions[0].filename)
+            return filenames
+
         # Подготовка к созданию репозитория - очистка директорий
         for directory in [self._conf.frepodirpath,
                           self._conf.frepodevdirpath,
@@ -940,7 +948,7 @@ class RepoMaker(BaseCommand):
                                     required, depstr))
                 exit_with_error(_('Could not resolve dependencies'))
             builded = [d for d in deps if d[2] == PackageType.PACKAGE_BUILDED]
-            files_to_copy = set([p[1].versions[0].filename for p in builded])
+            files_to_copy = get_deb_dev_to_copy(builded)
             intersection = files_to_copy & target_builded_deps
             # Исключаем пересечения с основным репозиторием
             files_to_copy -= intersection
