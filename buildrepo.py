@@ -9,6 +9,7 @@ import os
 import gzip
 import apt
 import apt.debfile
+import glob
 import apt_pkg
 import pwd
 import shutil
@@ -27,6 +28,7 @@ COMMAND_INIT = 'init'
 COMMAND_BUILD = 'build'
 COMMAND_MAKE_REPO = 'make-repo'
 COMMAND_MAKE_PACKAGE_CACHE = 'make-package-cache'
+COMMAND_REMOVE_SOURCES = 'remove-sources'
 DEVNULL = open(os.devnull, 'wb')
 
 DEB_RE = '^(?P<name>[\w\-\.]+)_(?P<version>[\w\.\-\~\+]+)_(?P<arch>[\w]+)\.deb$'
@@ -439,6 +441,9 @@ class BaseCommand(object):
             os.makedirs(root)
         self._conf = Configuration(root)
         Debhelper.base_init()
+
+    def run(self):
+        raise NotImplementedError()
 
 
 class RepoInitializer(BaseCommand):
@@ -1065,6 +1070,57 @@ class PackageCacheMaker(BaseCommand):
         return result
 
 
+class RemoveSourceCmd(BaseCommand):
+    def __init__(self, repodirpath, package_name):
+        super().__init__(repodirpath)
+        self.__pname = package_name
+
+    def run(self):
+        expr = '%s/%s_*.dsc' % (self._conf.srcdirpath, self.__pname)
+        sources = glob.glob(expr)
+        if not len(sources):
+            exit_with_error(_('No sources are found'))
+        sys.stdout.write(_('The following sources are found:\n'))
+        dscfiles = {num + 1: source for (num, source) in enumerate(sources)}
+        for num, dsc in enumerate(sources):
+            sys.stdout.write('%d\t%s\n' % (num + 1, os.path.basename(dsc)))
+        while True:
+            try:
+                choice = int(input(_('\nChoose source to be removed:\n')))
+            except ValueError:
+                continue
+            if choice not in dscfiles:
+                continue
+            dscfilepath = dscfiles.get(choice)
+            break
+        dscfilepath = os.path.join(self._conf.srcdirpath, dscfilepath)
+        dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
+        sources = [dscfilepath] + [os.path.join(self._conf.srcdirpath, source)
+                                   for source in dscfile.filelist]
+        binaries = []
+        pver = dscfile._sections['Version']
+        for binary in dscfile.binaries:
+            expr = '%s/%s_%s*deb' % (self._conf.repodirpath, binary, pver)
+            binaries = binaries + glob.glob(expr)
+        logging.info(_('The following sources will be removed: %s' % ', '.join(sources)))
+        if len(binaries):
+            logging.info(_('The following binaries will be removed: %s:' % ', '.join(binaries)))
+        while True:
+            answer = input(_('Do you want to countinue? (yes/NO): '))
+            if not len(answer) or answer == _('NO'):
+                logging.info(_('Operation was cancelled by user'))
+                exit(0)
+            elif answer == _('yes'):
+                break
+        for f in sources + binaries:
+            try:
+                logging.info(_('Removing %s ...') % f)
+                os.remove(f)
+            except OSError as e:
+                exit_with_error(_('Failed to remove file %s: %s' % (f, e)))
+        Debhelper.generate_packages_list(self._conf.repodirpath)
+
+
 def make_default_subparser(main_parser, command):
     parser = main_parser.add_parser(command)
     parser.add_argument('--path', required=False,
@@ -1106,6 +1162,12 @@ if __name__ == '__main__':
     parser_make_cache.add_argument('--primary', required=False,
                                    default=False, action='store_true',
                                    help=_('Is primary repo?'))
+
+    # remove-sources parser
+    remove_sources_parser = make_default_subparser(subparsers, COMMAND_REMOVE_SOURCES)
+    remove_sources_parser.add_argument('--package', required=True,
+                                       help=_('Source package name to be removed'))
+
     args = parser.parse_args()
     root = None
     try:
@@ -1123,20 +1185,26 @@ if __name__ == '__main__':
                     shutil.rmtree(directory)
 
         atexit.register(rm_tmp_dirs)
+        cmdmap = {COMMAND_INIT: RepoInitializer,
+                  COMMAND_BUILD: Builder,
+                  COMMAND_MAKE_REPO: RepoMaker,
+                  COMMAND_MAKE_PACKAGE_CACHE: PackageCacheMaker,
+                  COMMAND_REMOVE_SOURCES: RemoveSourceCmd,
+                  }
+        cls = cmdmap.get(args.command)
         if args.command == COMMAND_INIT:
-            initializer = RepoInitializer(root)
-            initializer.run()
+            cmdargs = (root,)
         elif args.command == COMMAND_BUILD:
-            builder = Builder(root, os.path.abspath(args.source_list), args.clean, args.jobs)
-            builder.run()
+            cmdargs = (root, os.path.abspath(args.source_list), args.clean, args.jobs)
         elif args.command == COMMAND_MAKE_REPO:
-            repomaker = RepoMaker(root, os.path.abspath(args.white_list), args.no_create_iso)
-            repomaker.run()
+            cmdargs = (root, os.path.abspath(args.white_list), args.no_create_iso)
         elif args.command == COMMAND_MAKE_PACKAGE_CACHE:
             cache_type = PackageType.PACKAGE_FROM_OS_REPO if args.primary else PackageType.PACKAGE_FROM_OS_DEV_REPO
-            cachemaker = PackageCacheMaker(root, os.path.abspath(args.mount_path), args.name, cache_type)
-            cachemaker.run()
+            cmdargs = (root, os.path.abspath(args.mount_path), args.name, cache_type)
+        elif args.command == COMMAND_REMOVE_SOURCES:
+            cmdargs = (root, args.package)
         else:
             parser.print_help()
+        cls(*cmdargs).run()
     except KeyboardInterrupt:
         logging.info(_('Exit on user\'s query'))
