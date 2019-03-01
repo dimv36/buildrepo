@@ -1071,9 +1071,10 @@ class PackageCacheMaker(BaseCommand):
 
 
 class RemoveSourceCmd(BaseCommand):
-    def __init__(self, repodirpath, package_name):
+    def __init__(self, repodirpath, package_name, remove_orig):
         super().__init__(repodirpath)
         self.__pname = package_name
+        self.__remove_orig = remove_orig
 
     def run(self):
         expr = '%s/%s_*.dsc' % (self._conf.srcdirpath, self.__pname)
@@ -1097,6 +1098,9 @@ class RemoveSourceCmd(BaseCommand):
         dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
         sources = [dscfilepath] + [os.path.join(self._conf.srcdirpath, source)
                                    for source in dscfile.filelist]
+        # if not self.__remove_orig:
+        #     orig = None
+        #     for source in sources:
         binaries = []
         pver = dscfile._sections['Version']
         for binary in dscfile.binaries:
@@ -1106,7 +1110,7 @@ class RemoveSourceCmd(BaseCommand):
         if len(binaries):
             logging.info(_('The following binaries will be removed: %s:' % ', '.join(binaries)))
         while True:
-            answer = input(_('Do you want to countinue? (yes/NO): '))
+            answer = input(_('Do you want to continue? (yes/NO): '))
             if not len(answer) or answer == _('NO'):
                 logging.info(_('Operation was cancelled by user'))
                 exit(0)
@@ -1167,6 +1171,9 @@ if __name__ == '__main__':
     remove_sources_parser = make_default_subparser(subparsers, COMMAND_REMOVE_SOURCES)
     remove_sources_parser.add_argument('--package', required=True,
                                        help=_('Source package name to be removed'))
+    remove_sources_parser.add_argument('--remove-orig', dest='remove_orig', required=False,
+                                       action='store_true', default=False,
+                                       help=_('Remove *.orig.tar.* source file, default: False'))
 
     args = parser.parse_args()
     root = None
@@ -1202,7 +1209,7 @@ if __name__ == '__main__':
             cache_type = PackageType.PACKAGE_FROM_OS_REPO if args.primary else PackageType.PACKAGE_FROM_OS_DEV_REPO
             cmdargs = (root, os.path.abspath(args.mount_path), args.name, cache_type)
         elif args.command == COMMAND_REMOVE_SOURCES:
-            cmdargs = (root, args.package)
+            cmdargs = (root, args.package, args.remove_orig)
         else:
             parser.print_help()
         cls(*cmdargs).run()
