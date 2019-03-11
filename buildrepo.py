@@ -1098,9 +1098,14 @@ class RemoveSourceCmd(BaseCommand):
         dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
         sources = [dscfilepath] + [os.path.join(self._conf.srcdirpath, source)
                                    for source in dscfile.filelist]
-        # if not self.__remove_orig:
-        #     orig = None
-        #     for source in sources:
+        if not self.__remove_orig:
+            orig = None
+            for source in sources:
+                if re.match('.*\\.orig\\..*', source):
+                    orig = source
+                    break
+            if orig:
+                sources.remove(orig)
         binaries = []
         pver = dscfile._sections['Version']
         for binary in dscfile.binaries:
