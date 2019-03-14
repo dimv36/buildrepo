@@ -664,7 +664,7 @@ class RepoMaker(BaseCommand):
         def __init__(self, name, version, is_dev):
             self.__directory = tmpdirmanager.create()
             self.__name = name
-            self.__version = version
+            self.__codename = self.get_codename()
             self.__version = version
             self.__is_dev = is_dev
             self.__base_init()
@@ -674,7 +674,8 @@ class RepoMaker(BaseCommand):
                 return 'amd64'
             exit_with_error('Unexpected machine: %s' % platform.machine())
 
-        def __get_codename(self):
+        @staticmethod
+        def get_codename():
             release = Debhelper.run_command_with_output('lsb_release -c -s')
             return release
 
@@ -704,7 +705,7 @@ class RepoMaker(BaseCommand):
                 fp.write('%s %s (%s) - %s DVD\n' % ('%s-devel' % self.__name
                                                     if self.__is_dev else self.__name,
                                                     self.__version,
-                                                    self.__get_codename(),
+                                                    self.__codename,
                                                     self.__get_arch()))
 
         def mkiso(self, conf):
@@ -718,11 +719,11 @@ class RepoMaker(BaseCommand):
                 for directory in ['db', 'conf']:
                     shutil.rmtree(directory)
                 now = datetime.datetime.now().strftime('%Y-%m-%d')
-                isoname = '%s_%s_%s.iso' % (self.__name, self.__version, now)
+                isoname = '%s_%s_%s_%s.iso' % (self.__name, self.__version, self.__codename, now)
                 if self.__is_dev:
                     isoname = 'devel-%s' % isoname
                 isopath = os.path.join(conf.isodirpath, isoname)
-                label = '%s %s (%s) %s' % (self.__name, self.__version, self.__get_codename(), self.__get_arch())
+                label = '%s %s (%s) %s' % (self.__name, self.__version, self.__codename, self.__get_arch())
                 os.chdir(os.path.join(self.__directory, '..'))
                 logging.info(_('Building iso %s for %s ...') % (isopath, self.__name))
                 Debhelper.run_command('genisoimage -r -J -o %s -V "%s" %s' % (isopath,
@@ -1007,7 +1008,8 @@ class RepoMaker(BaseCommand):
                                     os.path.join(tmpdir, file))
             os.chdir(os.path.join(tmpdir, '..'))
             now = datetime.datetime.now().strftime('%Y-%m-%d')
-            isoname = 'sources-%s_%s_%s.iso' % (self.__name, self.__version, now)
+            isoname = 'sources-%s_%s_%s_%s.iso' % (self.__name, self.__version,
+                                                   self.IsoRepositoryMaker.get_codename(), now)
             isopath = os.path.join(self._conf.isodirpath, isoname)
             label = '%s %s (sources)' % (self.__name, self.__version)
             logging.info(_('Building sources iso %s for %s ...') % (isopath, self.__name))
