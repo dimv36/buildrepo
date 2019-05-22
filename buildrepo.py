@@ -938,9 +938,9 @@ class RepoMaker(BaseCommand):
             dev_packages = sorted([p for p in set(dev_packages) - set(self.__packages['target'])])
         else:
             dev_packages = self.__packages['target-dev']
-        for pkg in dev_packages:
-            logging.info(_('Processing %s ...') % pkg)
-            deps = self.__get_depends_for_package(pkg)
+        for devpkg in dev_packages:
+            logging.info(_('Processing %s ...') % devpkg)
+            deps = self.__get_depends_for_package(devpkg)
             unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
             if len(unresolve):
                 for p in unresolve:
@@ -951,7 +951,7 @@ class RepoMaker(BaseCommand):
                         depstr = _('%s version %s') % (pkg.name, pkg.versions[0].version)
                     logging.error(_('Could not resolve %s for %s: %s') %
                                    ('dependency' if p[0] == required else 'subdependency',
-                                    required, depstr))
+                                    devpkg, depstr))
                 exit_with_error(_('Could not resolve dependencies'))
             builded = [d for d in deps if d[2] == PackageType.PACKAGE_BUILDED]
             files_to_copy = get_deb_dev_to_copy(builded)
@@ -963,7 +963,7 @@ class RepoMaker(BaseCommand):
                     continue
                 package_sources = Debhelper.get_sources_filelist(self._conf, package)
                 sources[package.name] = package_sources
-            logging.debug(_('Copying dependencies for package %s: %s') % (pkg, files_to_copy))
+            logging.debug(_('Copying dependencies for package %s: %s') % (devpkg, files_to_copy))
             for f in files_to_copy:
                 src = os.path.join(self._conf.root, f)
                 dst = os.path.join(self._conf.frepodevdirpath, os.path.basename(f))
