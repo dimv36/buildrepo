@@ -31,7 +31,7 @@ COMMAND_MAKE_PACKAGE_CACHE = 'make-package-cache'
 COMMAND_REMOVE_SOURCES = 'remove-sources'
 DEVNULL = open(os.devnull, 'wb')
 
-DEB_RE = '^(?P<name>[\w\-\.]+)_(?P<version>[\w\.\-\~\+]+)_(?P<arch>[\w]+)\.deb$'
+DEB_RE = '^(?P<name>[\w\-\.\+]+)_(?P<version>[\w\.\-\~\+]+)_(?P<arch>[\w]+)\.deb$'
 DSC_FULL_RE = '^(?P<name>[\w\-\.\+]+)_(?P<version>[\w\.\-\~\+]+)\.dsc$'
 DSC_RE = '^%s_(?P<version>[\w\.\-\~\+]+)\.dsc$'
 STANDART_BUILD_OPTIONS_TEMPLATE = 'DEB_BUILD_OPTIONS="nocheck parallel=%d"'
@@ -981,6 +981,7 @@ class RepoMaker(BaseCommand):
             else:
                 reversed_sources[value].append(key)
         for sourcelist, packages in reversed_sources.items():
+            packages = list(set(packages))
             logging.info(_('Copying sources for package(s) %s ...') % ', '.join(packages))
             for source in sourcelist:
                 dst = os.path.join(self._conf.fsrcdirpath, os.path.basename(source))
