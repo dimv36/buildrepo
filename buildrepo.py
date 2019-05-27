@@ -20,9 +20,11 @@ import platform
 import atexit
 import time
 import datetime
+import configparser
 
 CURDIR = os.path.abspath(os.path.curdir)
-DEFAULT_REPO_DIR = os.path.abspath('%s/../build' % CURDIR)
+DEFAULT_BUILD_DIR = os.path.abspath(os.path.join(CURDIR, 'build'))
+DEFAULT_CONF = os.path.join(CURDIR, 'buildrepo.conf')
 REPO_FILE_NAME = '/etc/apt/sources.list.d/build-repo.list'
 COMMAND_INIT = 'init'
 COMMAND_BUILD = 'build'
@@ -76,13 +78,20 @@ def fix_re(reg_exp):
     return reg_exp
 
 
+def fix_package_version(pver):
+    # TODO: Version hack
+    if ':' in pver:
+        pver = package_ver.split(':')[-1]
+    return pver
+
+
 class Debhelper:
     """
     Класс для запуска Debian утилит
     """
 
     @staticmethod
-    def run_command_with_output(command, ):
+    def run_command_with_output(command):
         return subprocess.check_output(command, shell=True, stderr=DEVNULL).decode().rstrip('\n')
 
     @staticmethod
@@ -125,6 +134,7 @@ class Debhelper:
 
     @staticmethod
     def generate_packages_list(repodirpath, ignore_errors=False):
+        logging.info(_('Generating packages list ...'))
         # Вызываем dpkg-scanpackages
         repo_name = os.path.basename(repodirpath)
         os.chdir(os.path.abspath('%s/..' % repodirpath))
@@ -161,7 +171,7 @@ class Debhelper:
     @staticmethod
     def get_build_dir(tmpdirpath):
         for file_name in os.listdir(tmpdirpath):
-            path = '%s/%s' % (tmpdirpath, file_name)
+            path = os.path.join(tmpdirpath, file_name)
             if os.path.isdir(path):
                 return path
 
@@ -326,7 +336,7 @@ class Debhelper:
     @staticmethod
     def find_packages_files(mount_point, package_file='Packages.gz'):
         if not os.path.exists(mount_point):
-            exit_with_error(_('Path %s does not exists'), mount_point)
+            exit_with_error(_('Path %s does not exists') % mount_point)
         distrs_path = os.path.join(mount_point, 'dists')
         result = []
         for root, dirs, files in os.walk(distrs_path):
@@ -337,8 +347,8 @@ class Debhelper:
     @staticmethod
     def copy_files(srcdir, dstdir, files):
         for f in files:
-            src = '%s/%s' % (srcdir, f)
-            dst = '%s/%s' % (dstdir, f)
+            src = os.path.join(srcdir, f)
+            dst = os.path.join(dstdir, f)
             logging.debug(_('Copying file %s to %s') % (src, dst))
             try:
                 shutil.copyfile(src, dst)
@@ -350,18 +360,15 @@ class Debhelper:
         dscfilepath = str()
         if package:
             candidate = package.versions[0]
-            package_name, package_ver = candidate.source_name, candidate.source_version
-            # TODO: Version hack
-            if ':' in package_ver:
-                package_ver = package_ver.split(':')[-1]
+            package_name, package_ver = candidate.source_name, fix_package_version(candidate.source_version)
             dscfilepath = '%s/%s_%s.dsc' % (conf.srcdirpath, package_name, package_ver)
         else:
-            dscfilepath = '%s/%s' % (conf.srcdirpath, dscfile)
+            dscfilepath = os.path.join(conf.srcdirpath, dscfile)
         try:
             dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
         except apt_pkg.Error as e:
             exit_with_error(e)
-        filelist = ['%s/%s' % (conf.srcdirpath, f) for f in dscfile.filelist]
+        filelist = [os.path.join(conf.srcdirpath, f) for f in dscfile.filelist]
         filelist = [dscfilepath] + filelist
         return tuple(item for item in filelist)
 
@@ -387,59 +394,68 @@ tmpdirmanager = TemporaryDirManager()
 
 
 class Configuration:
-    def __init__(self, root):
-        self.root = root
-        self.srcdirpath = os.path.join(root, 'src')
-        self.repodirpath = os.path.join(root, 'repo')
-        self.datadirpath = os.path.join(root, 'data')
-        self.logdirpath = os.path.join(root, 'logs')
-        self.cachedirpath = os.path.join(root, 'cache')
-        self.fsrcdirpath = os.path.join(root, 'fsrc')
-        self.frepodirpath = os.path.join(root, 'frepo')
-        self.frepodevdirpath = os.path.join(root, 'frepodev')
-        self.isodirpath = os.path.join(root, 'iso')
-        self.packageslistpath = os.path.join(self.datadirpath, 'packageslist.txt')
+    _instance = None
+    _inited = False
+
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = object.__new__(cls)
+        return cls._instance
+
+    def __init__(self, conf_path):
+        if not os.path.exists(conf_path) or not os.path.isfile(conf_path):
+            exit_with_error(_('Configuration does not found on %s') % conf_path)
+        self.conf_path = conf_path
+        self.parser = configparser.ConfigParser()
+        self.parser.read(conf_path)
+        self.root = self.parser.get('common', 'build-root', fallback=DEFAULT_BUILD_DIR)
         self.__base_init()
 
-    def __base_init(self):
-        if not os.path.exists(self.root):
-            os.mkdir(self.root)
-        for directory in [self.srcdirpath, self.repodirpath,
-                          self.datadirpath, self.logdirpath,
-                          self.cachedirpath, self.fsrcdirpath,
-                          self.frepodirpath, self.frepodevdirpath,
-                          self.isodirpath]:
+    def __safe_mkdir(self, directory):
+        try:
             if not os.path.exists(directory):
-                try:
-                    logging.debug(_('Creating directory %s ...') % directory)
-                    os.mkdir(directory)
-                except Exception as e:
-                    exit_with_error(_('Failed to create directory %s: %s') % (directory, e))
+                os.mkdir(directory)
+        except Exception as e:
+            exit_with_error(_('Failed to create directory %s: %s') % (directory, e))
 
-    @staticmethod
-    def init_logger(root):
-        if not os.path.exists(root):
-            os.mkdir(root)
+    def __base_init(self):
+        if self._inited:
+            return
+        self.__safe_mkdir(self.root)
+        for subdir in ['src', 'repo', 'data', 'logs',
+                       'cache', 'fsrc', 'frepo', 'frepodev', 'iso']:
+            setattr(self, '%sdirpath' % subdir, os.path.join(self.root, subdir))
+        self.packageslistpath = os.path.join(self.datadirpath, 'packageslist.txt')
+        self.__init_logger()
+        self._inited = True
+
+    def __init_logger(self):
+        self.__safe_mkdir(self.logsdirpath)
         logging.basicConfig(level=logging.DEBUG,
                             format='%(asctime)-8s %(levelname)-8s %(message)s',
                             datefmt='%Y-%m-%d %H:%M:%S',
-                            filename='%s/buildrepo.log' % root,
+                            filename='%s/buildrepo.log' % self.root,
                             filemode='a')
         console = logging.StreamHandler()
         console.setLevel(logging.INFO)
         formatter = logging.Formatter('%(levelname)-8s: %(message)s')
         console.setFormatter(formatter)
         logging.getLogger('').addHandler(console)
+        # Проверяем наличие прав суперпользователя
+        check_root_access()
         logging.info('*****' * 6)
-        logging.info(_('Running %s ...') % ' '.join(sys.argv))
+        logging.info(_('Running {} ...').format(' '.join(sys.argv)))
+        logging.info(_('Using build-root as {}').format(self.root))
         logging.info('*****' * 6)
 
 
-class BaseCommand(object):
-    def __init__(self, root):
-        if not os.path.exists(root):
-            os.makedirs(root)
-        self._conf = Configuration(root)
+class BaseCommand:
+    cmd = None
+
+    def __init__(self, conf):
+        if not os.path.exists(os.path.dirname(conf)):
+            os.makedirs(os.path.dirname(conf))
+        self._conf = Configuration(conf)
         Debhelper.base_init()
 
     def run(self):
@@ -447,11 +463,12 @@ class BaseCommand(object):
 
 
 class RepoInitializer(BaseCommand):
+    cmd = COMMAND_INIT
     """
     Класс выполняет подготовку при инициализации репозитория
     """
-    def __init__(self, root):
-        super().__init__(root)
+    def __init__(self, conf_path):
+        super().__init__(conf_path)
 
     def __init_build_dirs(self):
         """
@@ -464,7 +481,7 @@ class RepoInitializer(BaseCommand):
             logging.debug(_('Creating directory %s') % directory)
 
         for _directory in [self._conf.srcdirpath, self._conf.datadirpath,
-                           self._conf.repodirpath, self._conf.logdirpath,
+                           self._conf.repodirpath, self._conf.logsdirpath,
                            self._conf.cachedirpath, self._conf.fsrcdirpath,
                            self._conf.frepodirpath, self._conf.frepodevdirpath,
                            self._conf.isodirpath]:
@@ -501,6 +518,8 @@ class RepoInitializer(BaseCommand):
 
 
 class Builder(BaseCommand):
+    cmd = COMMAND_BUILD
+
     class PackageData:
         def __init__(self, name, version=None, options=None):
             self.name = name
@@ -511,7 +530,7 @@ class Builder(BaseCommand):
             return '%s: %s %s' % (self.name, self.version)
 
     class Scenario:
-        __NAME_TAG = '# Name:'
+        __NAME_TAG = '# name:'
         __COMMENT_TAG = '#'
         __BUILD_OPTIONS_TAG = 'options='
         __BUILD_VERSION = 'version='
@@ -561,16 +580,20 @@ class Builder(BaseCommand):
     """
     Класс выполняет сборку пакетов
     """
-    def __init__(self, repodirpath, scenario_path, clean, jobs):
-        super().__init__(repodirpath)
-        if not os.path.exists(scenario_path):
+    def __init__(self, conf_path):
+        super().__init__(conf_path)
+        scenario_path = self._conf.parser.get(Builder.cmd, 'source-list', fallback=None)
+        if not scenario_path:
+            exit_with_error(_('Source list does not specified in %s') % self._conf.conf_path)
+        elif not os.path.exists(scenario_path):
             exit_with_error(_('File %s does not exist') % scenario_path)
-        self.__clean = clean
-        self.__jobs = jobs
+        self.__clean = self._conf.parser.getboolean(Builder.cmd, 'clean', fallback=False)
+        self.__jobs = self._conf.parser.getint(Builder.cmd, 'jobs', fallback=2)
+        self.__force_rebuild = self._conf.parser.getboolean(Builder.cmd, 'force-rebuild', fallback=False)
         self.__scenario = self.Scenario(scenario_path)
 
     def __make_clean(self):
-        logging.info(_('Package cleaning before rebuilding...'))
+        logging.info(_('Package cleaning before building...'))
         init_packages_list = [p.rstrip('\n')
                               for p in open(self._conf.packageslistpath, mode='r').readlines()
                               if p.endswith('\n')]
@@ -589,7 +612,21 @@ class Builder(BaseCommand):
                 exit_with_error(_('Failed to remove packages: %s') % e)
 
     def __make_build(self):
-        def copy_files_to_builddir(package_data, tmpdirpath):
+        def copy_files_to_builddir(dscfilepath, tmpdirpath):
+            try:
+                files = Debhelper.get_sources_filelist(self._conf, dscfile=dscfilepath)
+            except IndexError:
+                exit_with_error(_('Failed determine files to copy from %s') % os.path.basename(dscfilepath))
+            # Копируем файлы во временную директорию
+            for file in files:
+                dst = os.path.join(tmpdirpath, os.path.basename(file))
+                try:
+                    shutil.copyfile(file, dst)
+                    shutil.chown(dst, user=BUILD_USER, group=BUILD_USER)
+                except Exception as e:
+                    exit_with_error(e)
+
+        def check_is_building_requred(package_data):
             reg_dsc = DSC_RE % package_data.name
             reg_dsc = fix_re(reg_dsc)
             dsc_files = [f for f in os.listdir(self._conf.srcdirpath) if re.search(reg_dsc, f)]
@@ -601,19 +638,23 @@ class Builder(BaseCommand):
                     len(versions),
                     package_data.name,
                     ', '.join(versions)))
-            # Определяем файлы для копирования
+            dscfilepath = os.path.join(self._conf.srcdirpath, dsc_files[0])
             try:
-                files = Debhelper.get_sources_filelist(self._conf, dscfile=dsc_files[0])
-            except IndexError:
-                exit_with_error(_('Failed determine files to copy %s') % package_data.name)
-            # Копируем файлы во временную директорию
-            for file in files:
-                dst = os.path.join(tmpdirpath, os.path.basename(file))
-                try:
-                    shutil.copyfile(file, dst)
-                    shutil.chown(dst, user=BUILD_USER, group=BUILD_USER)
-                except Exception as e:
-                    exit_with_error(e)
+                dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
+            except apt_pkg.Error as e:
+                exit_with_error(e)
+            version = dscfile['Version']
+            for binary in dscfile.binaries:
+                package = cache.get(binary)
+                if not package or not package.candidate.version == version:
+                    logging.debug(_('Source package %s will be builded because missing binaries') % package_data.name)
+                    return (dscfilepath, True)
+            if not self.__force_rebuild:
+                logging.info(_('Package %s already builded, spipped') % package_data.name)
+                return (dscfilepath, False)
+            else:
+                logging.info(_('Rebuilding package %s') % package_data.name)
+                return (dscfilepath, True)
 
         def copy_debs_files_to_repodir(package_data):
             version = package_data.version
@@ -629,22 +670,24 @@ class Builder(BaseCommand):
 
         logging.info(_('Executing scenario %s ...') % self.__scenario.name)
         for package_data in self.__scenario.packages:
-            tmpdirpath = tmpdirmanager.create()
-            Debhelper.run_command('chown -R %s.%s %s' % (BUILD_USER, BUILD_USER, tmpdirpath))
-            # Копируем исходники из src во временную директорию
-            copy_files_to_builddir(package_data, tmpdirpath)
-            # Распаковываем пакет
-            Debhelper.extract_sources(tmpdirpath, package_data.name)
-            # Определяем зависимости
-            Debhelper.install_build_depends(tmpdirpath, package_data.name)
-            # Запускаем сборку
-            Debhelper.build_package(tmpdirpath, self._conf.logdirpath, self.__jobs, package_data.options)
-            # Копируем *.deb в репозиторий
-            Debhelper.copy_debs(tmpdirpath, self._conf.repodirpath)
-            # Обновляем репозиторий
-            Debhelper.generate_packages_list(self._conf.repodirpath)
-            # Обновляем кэш
-            cache.update()
+            dscfile, need_building = check_is_building_requred(package_data)
+            if need_building:
+                tmpdirpath = tmpdirmanager.create()
+                Debhelper.run_command('chown -R %s.%s %s' % (BUILD_USER, BUILD_USER, tmpdirpath))
+                # Копируем исходники из src во временную директорию
+                copy_files_to_builddir(dscfile, tmpdirpath)
+                # Распаковываем пакет
+                Debhelper.extract_sources(tmpdirpath, package_data.name)
+                # Определяем зависимости
+                Debhelper.install_build_depends(tmpdirpath, package_data.name)
+                # Запускаем сборку
+                Debhelper.build_package(tmpdirpath, self._conf.logsdirpath, self.__jobs, package_data.options)
+                # Копируем *.deb в репозиторий
+                Debhelper.copy_debs(tmpdirpath, self._conf.repodirpath)
+                # Обновляем репозиторий
+                Debhelper.generate_packages_list(self._conf.repodirpath)
+                # Обновляем кэш
+                cache.update()
 
     def run(self):
         if self.__clean:
@@ -660,6 +703,8 @@ class PackageType:
 
 
 class RepoMaker(BaseCommand):
+    cmd = COMMAND_MAKE_REPO
+
     class IsoRepositoryMaker:
         def __init__(self, name, version, is_dev):
             self.__directory = tmpdirmanager.create()
@@ -775,12 +820,14 @@ class RepoMaker(BaseCommand):
                     depname = str(i).split(':')[1].strip()
                     s.append((p.name, depname, PackageType.PACKAGE_NOT_FOUND,))
 
-    def __init__(self, repodirpath, white_list_path, no_create_iso):
-        super().__init__(repodirpath)
-        if not os.path.exists(white_list_path):
-            exit_with_error(_('File %s does not exist') % white_list_path)
-        self.__white_list = white_list_path
-        self.__no_create_iso = no_create_iso
+    def __init__(self, conf_path):
+        super().__init__(conf_path)
+        self.__white_list_path = self._conf.parser.get(RepoMaker.cmd, 'white-list', fallback=None)
+        self.__no_create_iso = self._conf.parser.getboolean(RepoMaker.cmd, 'no-create-iso', fallback=False)
+        if not self.__white_list_path:
+            exit_with_error(_('White list does not specified in %s') % self._conf.conf_path)
+        if not os.path.exists(self.__white_list_path):
+            exit_with_error(_('File %s does not exist') % self.__white_list_path)
         self.__packages = {}
         self.__caches = []
         self.__name = None
@@ -793,7 +840,7 @@ class RepoMaker(BaseCommand):
     def __parse_white_list(self):
         i = 1
         last_section = None
-        for line in open(self.__white_list, mode='r').readlines():
+        for line in open(self.__white_list_path, mode='r').readlines():
             i += 1
             m = re.match(r'#\s?(?P<key>\w+)\s?:\s?(?P<value>[\w.\-]+)', line)
             if m:
@@ -836,18 +883,18 @@ class RepoMaker(BaseCommand):
 
     def __build_cache_of_builded_packages(self):
         logging.info(_('Build cache for builded packages ...'))
-        maker = PackageCacheMaker(self._conf.root,
-                                  self._conf.repodirpath,
-                                  'builded',
-                                  PackageType.PACKAGE_BUILDED)
-        maker.run(is_builded=True)
+        maker = PackageCacheMaker(self._conf.conf_path)
+        maker.run(mount_path=self._conf.repodirpath,
+                  name='builded',
+                  primary=False,
+                  is_builded=True)
 
     def __load_caches(self):
         files = [f for f in os.listdir(self._conf.cachedirpath) if f.endswith('.cache')]
         if len(files) <= 1:
             exit_with_error(_('No one cache is created'))
         for f in files:
-            path = '%s/%s' % (self._conf.cachedirpath, f)
+            path = os.path.join(self._conf.cachedirpath, f)
             with open(path, mode='r') as json_data:
                 self.__caches.append(json.load(json_data))
         os_repo_exists = any([cache[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_FROM_OS_REPO
@@ -878,7 +925,7 @@ class RepoMaker(BaseCommand):
                           self._conf.fsrcdirpath]:
             logging.debug(_('Clearing %s') % directory)
             for file in os.listdir(directory):
-                os.remove('%s/%s' % (directory, file))
+                os.remove(os.path.join(directory, file))
         logging.info(_('Processing target repository ...'))
         # Анализ пакетов основного репозитория
         target_builded_deps = set()
@@ -1024,26 +1071,33 @@ class RepoMaker(BaseCommand):
 
 
 class PackageCacheMaker(BaseCommand):
+    cmd = COMMAND_MAKE_PACKAGE_CACHE
+    args = (
+                ('--mount-path', {'required': True, 'help': _('Set path to repo\'s mount point')}),
+                ('--name', {'required': True, 'help': _('Set package name of repo')}),
+                ('--primary', {'required': False, 'default': False, 'action': 'store_true',
+                 'help': _('Is primary repo?')})
+           )
     __DIRECTIVE_PACKAGE = 'Package: '
     __DIRECTIVE_VERSION = 'Version: '
     __DIRECTIVE_DESCRIPTION_ENDS = ''
 
-    def __init__(self, repodirpath, mount_point, name, cache_type):
-        super().__init__(repodirpath)
-        if not os.path.exists(mount_point):
-            exit_with_error(_('Path %s does not exist') % mount_point)
-        self.__name = name
-        self.__mount_point = mount_point
-        self.__cache_type = cache_type
-
-    def run(self, is_builded=False):
+    def run(self, mount_path, name, primary, is_builded=False):
         if not is_builded:
-            packages_path = Debhelper.find_packages_files(self.__mount_point)
+            packages_path = Debhelper.find_packages_files(mount_path)
         else:
-            packages_path = ['%s/Packages' % self.__mount_point]
-        cache_file_path = '%s/%s.cache' % (self._conf.cachedirpath, self.__name)
-        result = {DIRECTIVE_CACHE_NAME: self.__name,
-                  DIRECTIVE_CACHE_TYPE: self.__cache_type}
+            packages_path = [os.path.join(mount_path, 'Packages')]
+        if not len(packages_path):
+            exit_with_error(_('Can\'t find any Packages files in %s') % mount_path)
+        cache_file_path = '%s/%s.cache' % (self._conf.cachedirpath, name)
+        if is_builded:
+            cache_type = PackageType.PACKAGE_BUILDED
+        elif primary:
+            cache_type = PackageType.PACKAGE_FROM_OS_REPO
+        else:
+            cache_type = PackageType.PACKAGE_FROM_OS_DEV_REPO
+        result = {DIRECTIVE_CACHE_NAME: name,
+                  DIRECTIVE_CACHE_TYPE: cache_type}
         packages = []
         for path in packages_path:
             try:
@@ -1074,13 +1128,15 @@ class PackageCacheMaker(BaseCommand):
 
 
 class RemoveSourceCmd(BaseCommand):
-    def __init__(self, repodirpath, package_name, remove_orig):
-        super().__init__(repodirpath)
-        self.__pname = package_name
-        self.__remove_orig = remove_orig
+    cmd = COMMAND_REMOVE_SOURCES
+    args = (
+                ('--package', {'required': True, 'help': _('Source package name to be removed')}),
+                ('--remove-orig', {'dest': 'remove_orig', 'action': 'store_true',
+                 'default': False, 'help': _('Remove *.orig.tar.* source file, default: False')})
+           )
 
-    def run(self):
-        expr = '%s/%s_*.dsc' % (self._conf.srcdirpath, self.__pname)
+    def run(self, package, remove_orig):
+        expr = '%s/%s_*.dsc' % (self._conf.srcdirpath, package)
         sources = glob.glob(expr)
         if not len(sources):
             exit_with_error(_('No sources are found'))
@@ -1101,7 +1157,7 @@ class RemoveSourceCmd(BaseCommand):
         dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
         sources = [dscfilepath] + [os.path.join(self._conf.srcdirpath, source)
                                    for source in dscfile.filelist]
-        if not self.__remove_orig:
+        if not remove_orig:
             orig = None
             for source in sources:
                 if re.match('.*\\.orig\\..*', source):
@@ -1110,7 +1166,7 @@ class RemoveSourceCmd(BaseCommand):
             if orig:
                 sources.remove(orig)
         binaries = []
-        pver = dscfile._sections['Version']
+        pver = dscfile['Version']
         for binary in dscfile.binaries:
             expr = '%s/%s_%s*deb' % (self._conf.repodirpath, binary, pver)
             binaries = binaries + glob.glob(expr)
@@ -1135,64 +1191,47 @@ class RemoveSourceCmd(BaseCommand):
 
 def make_default_subparser(main_parser, command):
     parser = main_parser.add_parser(command)
-    parser.add_argument('--path', required=False,
-                        default=DEFAULT_REPO_DIR,
-                        help=_('Root directory for building (default: %s)') % DEFAULT_REPO_DIR)
+    parser.add_argument('--config', required=False,
+                        default=DEFAULT_CONF,
+                        help=_('Buildrepo config path (default: %s)') % DEFAULT_CONF)
     return parser
 
+
+def available_commands():
+    """
+    Возвращает словарь вида {CMD: (cls, tuple)}
+    cmd -- имя команды, cls -- класс и tuple -- кортеж аргументов
+    """
+    import inspect
+
+    def command_predicate(obj):
+        if inspect.isclass(obj):
+            cmd = getattr(obj, 'cmd', None)
+            return cmd is not None
+        return False
+
+    return {tup[1].cmd: (tup[1], getattr(tup[1], 'args', None))
+            for tup in inspect.getmembers(sys.modules[__name__], command_predicate)}
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest='command')
+    cmdmap = available_commands()
 
-    # init parser
-    parser_init = make_default_subparser(subparsers, COMMAND_INIT)
-
-    # build parser
-    parser_build = make_default_subparser(subparsers, COMMAND_BUILD)
-    parser_build.add_argument('--source-list', required=True,
-                              help=_('Set path to scenario file'))
-    parser_build.add_argument('--clean', required=False, action='store_true',
-                              default=False,
-                              help=_('Clear packages before building (default: False)'))
-    parser_build.add_argument('--jobs', required=False, action='store', type=int,
-                              default=2,
-                              help=_('Jobs count for package building (default: 2)'))
-    # make repo parser
-    parser_make_repo = make_default_subparser(subparsers, COMMAND_MAKE_REPO)
-    parser_make_repo.add_argument('--white-list', required=True,
-                                  help=_('Set path to white list'))
-    parser_make_repo.add_argument('--no-create-iso', required=False, action='store_true',
-                                  help=_('Skip iso creation after binary depends resolving, default: False'))
-
-    # make package cache parser
-    parser_make_cache = make_default_subparser(subparsers, COMMAND_MAKE_PACKAGE_CACHE)
-    parser_make_cache.add_argument('--mount-path', required=True,
-                                   help=_('Set path to repo\'s mount point'))
-    parser_make_cache.add_argument('--name', required=True,
-                                   help=_('Set package name of repo'))
-    parser_make_cache.add_argument('--primary', required=False,
-                                   default=False, action='store_true',
-                                   help=_('Is primary repo?'))
-
-    # remove-sources parser
-    remove_sources_parser = make_default_subparser(subparsers, COMMAND_REMOVE_SOURCES)
-    remove_sources_parser.add_argument('--package', required=True,
-                                       help=_('Source package name to be removed'))
-    remove_sources_parser.add_argument('--remove-orig', dest='remove_orig', required=False,
-                                       action='store_true', default=False,
-                                       help=_('Remove *.orig.tar.* source file, default: False'))
+    for cmd in sorted(cmdmap.keys()):
+        cls, cmdargs = cmdmap.get(cmd)
+        subparser = make_default_subparser(subparsers, cmd)
+        if cmdargs:
+            for cmdarg in cmdargs:
+                arg, kwargs = cmdarg
+                subparser.add_argument(arg, **kwargs)
 
     args = parser.parse_args()
-    root = None
     try:
-        root = os.path.abspath(args.path)
+        conf = os.path.abspath(args.config)
     except AttributeError:
         parser.print_help()
         exit(1)
-    Configuration.init_logger(root)
-    # Проверяем наличие прав суперпользователя
-    check_root_access()
     try:
         def rm_tmp_dirs():
             for directory in tmpdirmanager.dirs():
@@ -1200,24 +1239,14 @@ if __name__ == '__main__':
                     shutil.rmtree(directory)
 
         atexit.register(rm_tmp_dirs)
-        cmdmap = {COMMAND_INIT: RepoInitializer,
-                  COMMAND_BUILD: Builder,
-                  COMMAND_MAKE_REPO: RepoMaker,
-                  COMMAND_MAKE_PACKAGE_CACHE: PackageCacheMaker,
-                  COMMAND_REMOVE_SOURCES: RemoveSourceCmd,
-                  }
-        cls = cmdmap.get(args.command)
-        if args.command == COMMAND_INIT:
-            cmdargs = (root,)
-        elif args.command == COMMAND_BUILD:
-            cmdargs = (root, os.path.abspath(args.source_list), args.clean, args.jobs)
-        elif args.command == COMMAND_MAKE_REPO:
-            cmdargs = (root, os.path.abspath(args.white_list), args.no_create_iso)
-        elif args.command == COMMAND_MAKE_PACKAGE_CACHE:
-            cache_type = PackageType.PACKAGE_FROM_OS_REPO if args.primary else PackageType.PACKAGE_FROM_OS_DEV_REPO
-            cmdargs = (root, os.path.abspath(args.mount_path), args.name, cache_type)
-        elif args.command == COMMAND_REMOVE_SOURCES:
-            cmdargs = (root, args.package, args.remove_orig)
+        cmdargs = {}
+        for arg in dir(args):
+            if (not arg.startswith('_') and arg not in ('command', 'config')):
+                cmdargs[arg] = getattr(args, arg)
+        cmdtuple = cmdmap.get(args.command)
+        if cmdtuple:
+            cls, *other = cmdtuple
+            cls(args.config).run(**cmdargs)
         else:
             parser.print_help()
         cls(*cmdargs).run()
