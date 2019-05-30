@@ -696,9 +696,9 @@ class Builder(BaseCommand):
 
 
 class PackageType:
-    (PACKAGE_FROM_OS_REPO,
+    (PACKAGE_BUILDED,
+     PACKAGE_FROM_OS_REPO,
      PACKAGE_FROM_OS_DEV_REPO,
-     PACKAGE_BUILDED,
      PACKAGE_NOT_FOUND) = range(0, 4)
 
 
@@ -952,6 +952,7 @@ class RepoMaker(BaseCommand):
                                  for cache in self.__caches])
         if not os_dev_repo_exists:
             exit_with_error(_('Cache for OS dev repo is needed'))
+        self.__caches = sorted(self.__caches, key=lambda c: c[DIRECTIVE_CACHE_TYPE])
 
     def __get_depends_for_package(self, package, exclude_rules=None, black_list=None):
         depfinder = self.DependencyFinder(package,
@@ -1013,7 +1014,16 @@ class RepoMaker(BaseCommand):
                     continue
                 package_sources = Debhelper.get_sources_filelist(self._conf, package=package)
                 sources[package.name] = package_sources
-            files_to_copy = set([p[1].versions[0].filename for p in target_deps])
+            files_to_copy = set()
+            # Hack:
+            # Поскольку в собираемом репозитории может быть пакет с той же версией,
+            # что и в DEV репозиториии ОС, то нам требуется определить путь к пакету
+            # из собираемого репозитория.
+            for item in target_deps:
+                p = item[1]
+                for version in p.versions:
+                    if self._conf.repodirpath in version.uri:
+                        files_to_copy.add(version.filename)
             target_builded_deps.update(files_to_copy)
             logging.debug(_('Copying dependencies for package %s: %s') % (required, files_to_copy))
             for f in files_to_copy:
