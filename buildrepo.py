@@ -1024,6 +1024,7 @@ class RepoMaker(BaseCommand):
                 for version in p.versions:
                     if self._conf.repodirpath in version.uri:
                         files_to_copy.add(version.filename)
+                        break
             target_builded_deps.update(files_to_copy)
             logging.debug(_('Copying dependencies for package %s: %s') % (required, files_to_copy))
             for f in files_to_copy:
