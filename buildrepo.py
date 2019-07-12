@@ -25,7 +25,6 @@ import configparser
 CURDIR = os.path.abspath(os.path.curdir)
 DEFAULT_BUILD_DIR = os.path.abspath(os.path.join(CURDIR, 'build'))
 DEFAULT_CONF = os.path.join(CURDIR, 'buildrepo.conf')
-REPO_FILE_NAME = '/etc/apt/sources.list.d/build-repo.list'
 COMMAND_INIT = 'init'
 COMMAND_BUILD = 'build'
 COMMAND_MAKE_REPO = 'make-repo'
@@ -409,7 +408,13 @@ class Configuration:
         self.parser = configparser.ConfigParser()
         self.parser.read(conf_path)
         self.root = self.parser.get('common', 'build-root', fallback=DEFAULT_BUILD_DIR)
+        self.reponame = self.parser.get('common', 'repo-name', fallback=None)
+        self.repoversion = self.parser.get('common', 'repo-version', fallback=None)
         self.__base_init()
+        if not self.reponame:
+            exit_with_error(_('Repository name is missing in %s') % conf_path)
+        if not self.repoversion:
+            exit_with_error(_('Repository version is missing in %s') % conf_path)
 
     def __safe_mkdir(self, directory):
         try:
@@ -496,13 +501,14 @@ class RepoInitializer(BaseCommand):
         packagelist_file.close()
         logging.info(_('Creating package list of system in file %s') % self._conf.packageslistpath)
 
-    def __init_repo(self, repo_filename, repo_path):
-        repo_file = open(repo_filename, mode='w')
-        content = 'deb "file://%s" %s/' % (os.path.abspath('%s/..' % repo_path),
-                                           os.path.basename(repo_path))
-        repo_file.write(content)
-        repo_file.close()
-        logging.info(_('Repo file %s is created with content: %s') % (repo_filename, content))
+    def __init_repo(self):
+        repofile = '/etc/apt/sources.list.d/%s.list' % self._conf.reponame
+        repo_path = self._conf.repodirpath
+        with open(repofile, mode='w') as fp:
+            content = 'deb "file://%s" %s/' % (os.path.abspath('%s/..' % repo_path),
+                                               os.path.basename(repo_path))
+            fp.write(content)
+        logging.info(_('Repo file %s is created with content: %s') % (repofile, content))
         Debhelper.generate_packages_list(repo_path, ignore_errors=True)
 
     def run(self):
@@ -514,7 +520,7 @@ class RepoInitializer(BaseCommand):
         # Инициализируем список пакетов
         self.__init_packages_list()
         # Инициализация репозитория
-        self.__init_repo(REPO_FILE_NAME, self._conf.repodirpath)
+        self.__init_repo()
 
 
 class Builder(BaseCommand):
@@ -538,7 +544,6 @@ class Builder(BaseCommand):
 
         def __init__(self, scenario_path):
             self.scenario_path = scenario_path
-            self.name = None
             self.packages = []
             self.__parse_scenario()
 
@@ -547,13 +552,7 @@ class Builder(BaseCommand):
                 for line in scenario.readlines():
                     if line.endswith('\n'):
                         line = line.rstrip('\n')
-                    if not line:
-                        continue
-                    if line.startswith(self.__NAME_TAG):
-                        name = line.split(self.__NAME_TAG)[1]
-                        name = name.replace(' ', '')
-                        self.name = name
-                    elif line.startswith(self.__COMMENT_TAG):
+                    if not line or line.startswith(self.__COMMENT_TAG):
                         continue
                     else:
                         tokens = [e for e in line.split(' ') if not e.isspace()]
@@ -572,8 +571,6 @@ class Builder(BaseCommand):
                                     options = None
                         package_data = Builder.PackageData(name, version, options)
                         self.packages.append(package_data)
-                if self.name is None:
-                    exit_with_error(_('Scenario name is missing in file %s') % self.scenario_path)
             logging.info(_('Following packages will be built: \n%s') %
                          '\n'.join([p.name for p in self.packages]))
 
@@ -877,8 +874,6 @@ class RepoMaker(BaseCommand):
         logging.info(_('Using %s rule for packages for 2nd disk') % ', '.join(self.__dev_packages_suffixes))
         self.__packages = {}
         self.__caches = []
-        self.__name = None
-        self.__version = None
         self.__sources = {}
         self.__build_cache_of_builded_packages()
         self.__load_caches()
@@ -889,16 +884,7 @@ class RepoMaker(BaseCommand):
         last_section = None
         for line in open(self.__white_list_path, mode='r').readlines():
             i += 1
-            m = re.match(r'#\s?(?P<key>\w+)\s?:\s?(?P<value>[\w.\-]+)', line)
-            if m:
-                try:
-                    setattr(self, '_%s__%s' % (self.__class__.__name__,
-                                               m.group('key')), m.group('value'))
-                    continue
-                except AttributeError:
-                    exit_with_error(_('Unexpected key %s in white list %s') % (m.group('key'),
-                                                                               self.__white_list))
-            elif line.startswith('#') or line == '\n':
+            if line.startswith('#') or line == '\n':
                 continue
             line = line.rstrip('\n')
             if line.startswith('[') and line.endswith(']'):
@@ -916,9 +902,6 @@ class RepoMaker(BaseCommand):
                 self.__packages[last_section] = packages
         if 'target' not in self.__packages:
             exit_with_error(_('White list for target repository is empty'))
-        # Проверка на наличие полей name и version
-        if self.__name is None or self.__version is None:
-            exit_with_error(_('Name and version fields are required'))
         # Проверка на пересечение
         all_pkgs = set()
         for section, packages in self.__packages.items():
@@ -1101,7 +1084,7 @@ class RepoMaker(BaseCommand):
             return
         # Создаем репозиторий (main и dev)
         for is_dev in (False, True):
-            iso_maker = self.IsoRepositoryMaker(self.__name, self.__version, is_dev)
+            iso_maker = self.IsoRepositoryMaker(self._conf.reponame, self._conf.repoversion, is_dev)
             iso_maker.mkiso(self._conf)
         # Формируем образ диска с исходниками
         tmpdir = tmpdirmanager.create()
@@ -1116,11 +1099,11 @@ class RepoMaker(BaseCommand):
                                     os.path.join(tmpdir, file))
             os.chdir(os.path.join(tmpdir, '..'))
             now = datetime.datetime.now().strftime('%Y-%m-%d')
-            isoname = 'sources-%s_%s_%s_%s.iso' % (self.__name, self.__version,
+            isoname = 'sources-%s_%s_%s_%s.iso' % (self._conf.reponame, self._conf.repoversion,
                                                    self.IsoRepositoryMaker.get_codename(), now)
             isopath = os.path.join(self._conf.isodirpath, isoname)
-            label = '%s %s (sources)' % (self.__name, self.__version)
-            logging.info(_('Building sources iso %s for %s ...') % (isopath, self.__name))
+            label = '%s %s (sources)' % (self._conf.reponame, self._conf.repoversion)
+            logging.info(_('Building sources iso %s for %s ...') % (isopath, self._conf.reponame))
             Debhelper.run_command('genisoimage -r -J -o %s -V "%s" %s' % (isopath,
                                                                           label,
                                                                           tmpdir))
