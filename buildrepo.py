@@ -665,7 +665,7 @@ class Builder(BaseCommand):
                      if file_name.startswith(search) and file_name.endswith('.deb')]
             Debhelper.copy_files(self._conf.debsdirpath, self._conf.repodirpath, files)
 
-        logging.info(_('Executing scenario %s ...') % self.__scenario.name)
+        logging.info(_('Building packages from %s ...') % self.__scenario.scenario_path)
         for package_data in self.__scenario.packages:
             dscfile, need_building = check_is_building_requred(package_data)
             if need_building:
