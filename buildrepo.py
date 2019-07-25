@@ -184,7 +184,7 @@ class Debhelper:
                 return any(pkg.installed and apt_pkg.check_dep(pkg.installed.version, op, version) for pkg in pkgs)
             return True
 
-        def install_package_or_providing(ptuple, builded_package):
+        def install_package_or_providing(ptuple, builded_package, critical=True):
             pname, version, op = ptuple
             real_pkg = cache.get(pname, None)
             if not real_pkg:
@@ -192,7 +192,11 @@ class Debhelper:
             else:
                 packages = [real_pkg]
             if not len(packages):
-                exit_with_error(_('Failed to get package %s from cache') % pname)
+                if critical:
+                    exit_with_error(_('Failed to get package %s from cache') % pname)
+                else:
+                    logging.info(_('Failed to get package %s from cache') % pname)
+                    return False, None
             for pdep in packages:
                 if pdep.is_installed:
                     if len(version) and not apt_pkg.check_dep(pdep.installed.version, op, version):
@@ -287,7 +291,7 @@ class Debhelper:
                                     if len(p[1]) else p[0] for p in dep])
                 logging.info(_('Processing alternative dependencies %s ...') % depstr)
                 for alt in dep:
-                    is_installed, installed_pkg = install_package_or_providing(alt, pkgname)
+                    is_installed, installed_pkg = install_package_or_providing(alt, pkgname, critical=False)
                     alt_installed = alt_installed or is_installed
                     if alt_installed:
                         break
@@ -623,7 +627,7 @@ class Builder(BaseCommand):
                 except Exception as e:
                     exit_with_error(e)
 
-        def check_is_building_requred(package_data):
+        def check_is_building_required(package_data):
             reg_dsc = DSC_RE % package_data.name
             reg_dsc = fix_re(reg_dsc)
             dsc_files = [f for f in os.listdir(self._conf.srcdirpath) if re.search(reg_dsc, f)]
@@ -667,7 +671,7 @@ class Builder(BaseCommand):
 
         logging.info(_('Building packages from %s ...') % self.__scenario.scenario_path)
         for package_data in self.__scenario.packages:
-            dscfile, need_building = check_is_building_requred(package_data)
+            dscfile, need_building = check_is_building_required(package_data)
             if need_building:
                 tmpdirpath = tmpdirmanager.create()
                 Debhelper.run_command('chown -R %s.%s %s' % (BUILD_USER, BUILD_USER, tmpdirpath))
