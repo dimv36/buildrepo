@@ -269,8 +269,16 @@ class Debhelper:
                     dep = cache.get(c_name)
                     if not dep:
                         continue
-                    dep.mark_delete()
-                    cache.commit()
+                    if dep.is_installed:
+                        conflict_ver, conflict_op = conflict[0][1:]
+                        remove_conflict = False
+                        if len(conflict_ver):
+                            remove_conflict = apt_pkg.check_dep(dep.installed.version, conflict_op, conflict_ver)
+                        else:
+                            remove_conflict = True
+                        if remove_conflict:
+                            dep.mark_delete()
+                            cache.commit()
                 except Exception as e:
                     exit_with_error(e)
                 finally:
