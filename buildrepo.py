@@ -1216,7 +1216,8 @@ class RemoveSourceCmd(BaseCommand):
         pver = dscfile['Version']
         for binary in dscfile.binaries:
             expr = '%s/%s_%s*deb' % (self._conf.repodirpath, binary, pver)
-            binaries = binaries + glob.glob(expr)
+            dbg_expr = '%s/%s-dbgsym_%s*deb' % (self._conf.repodirpath, binary, pver)
+            binaries = binaries + glob.glob(expr) + glob.glob(dbg_expr)
         logging.info(_('The following sources will be removed: %s' % ', '.join(sources)))
         if len(binaries):
             logging.info(_('The following binaries will be removed: %s:' % ', '.join(binaries)))
