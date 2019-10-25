@@ -197,54 +197,45 @@ class Debhelper:
                 else:
                     logging.info(_('Failed to get package %s from cache') % pname)
                     return False, None
+            # Определение кандидата пакета на установку
             for pdep in packages:
-                if pdep.is_installed:
-                    if len(version) and not apt_pkg.check_dep(pdep.installed.version, op, version):
-                        try:
-                            pdep.mark_install()
-                            cache.commit()
-                        except apt_pkg.Error:
-                            pass
-                        finally:
-                            cache.open()
-                        if not check_package_version(pdep.name, op, version):
-                            logging.error(_('For package %s building %s (version %s) is required, '
-                                            'but installed %s') % (builded_package, pname, version,
-                                                                   pdep.installed.version))
-                            return False, None
-                        else:
-                            logging.info(_('Dependency %s (%s %s) installed') % (pdep.name, op, version))
-                            return True, None
-                    logging.info(_('Package %s already installed') % pname)
-                    return True, None
-                if cache.is_virtual_package(pdep.name):
-                    logging.info(_('Package %s is virtual, provided by %s ...') % (pname, pdep.name))
-                logging.info(_('Installing dependency %s ...') % pdep.name)
+                package_versions = pdep.versions
+                if not len(package_versions):
+                    logging.error(_('Could not resolve dependency %s') % pdep.name)
+                    return False, None
+                # Если у нас есть условие на версию, пытаемся определить версию пакета на установку
+                # Согласно условию
+                pver_resolved = None
+                if len(version):
+                    for pver in package_versions:
+                        if apt_pkg.check_dep(pver.source_version, op, version):
+                            logging.debug(_('Package %s resolves expression %s %s') % (pver, op, version))
+                            pver_resolved = pver
+                            break
+                # Нет условия на версию? Используем версию кандидата
+                else:
+                    pver_resolved = pdep.candidate
+                # Условие на версию не выполнено
+                if not pver_resolved:
+                    logging.error(_('Failed to resolve dependency %s %s %s') % (pname, op, version))
+                    return False, None
+                # Проверяем, установлен ли пакет
+                if pdep.installed:
+                    if len(version) and apt_pkg.check_dep(pdep.installed.version, op, version):
+                        return True, pdep.name
+                    # Зависимости по версии нет?
+                    return True, pdep.name
+                # Теперь устанавливаем кандидата для установки
                 try:
+                    pdep.candidate = pver_resolved
+                    logging.info(_('Installing %s ...') % pdep.candidate)
                     pdep.mark_install()
                     cache.commit()
-                except apt_pkg.Error:
-                    pass
+                    return True, pdep.name
+                except apt_pkg.Error as e:
+                    logging.error(_('Failed to install %s: %s') % (pdep.candidate, e))
                 finally:
                     cache.open()
-                # Проверяем, установлен ли пакет
-                dep = [cache.get(pdep.name)] or cache.get_providing_packages(pdep.name, include_nonvirtual=True)
-                if not len(dep):
-                    return False, pdep.name
-                dep = dep[0]
-                if len(op) and len(version):
-                    req_version = check_package_version(dep.name, op, version)
-                    if not req_version:
-                        if dep.installed:
-                            installed_ver = 'installed %s' % dep.installed.version
-                        else:
-                            installed_ver = '%s is not not installed' % dep.name
-                        logging.error(_('For package %s building %s (version %s) is required, '
-                                        '%s') % (builded_package, pname, version,
-                                                 installed_ver))
-                    return req_version, pdep.name
-                return True if dep.installed else False, dep.name
-            # Не должно дойти сюда
             return False, None
 
         def form_depends(depends):
