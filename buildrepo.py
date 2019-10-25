@@ -537,6 +537,13 @@ class RepoInitializer(BaseCommand):
 
 class Builder(BaseCommand):
     cmd = COMMAND_BUILD
+    args = (
+                ('--force-rebuild', {'required': False, 'action': 'store_true',
+                                     'default': False, 'help': _('Force rebuild')}),
+                ('--clean', {'required': False, 'action': 'store_true',
+                             'default': False, 'help': _('Remove installed packages on time of repo initializing')}),
+                ('--jobs', {'required': False, 'type': int, 'default': 2, 'help': _('Jobs count for building')})
+           )
 
     class PackageData:
         def __init__(self, name, version=None, options=None):
@@ -596,9 +603,6 @@ class Builder(BaseCommand):
             exit_with_error(_('Source list does not specified in %s') % self._conf.conf_path)
         elif not os.path.exists(scenario_path):
             exit_with_error(_('File %s does not exist') % scenario_path)
-        self.__clean = self._conf.parser.getboolean(Builder.cmd, 'clean', fallback=False)
-        self.__jobs = self._conf.parser.getint(Builder.cmd, 'jobs', fallback=2)
-        self.__force_rebuild = self._conf.parser.getboolean(Builder.cmd, 'force-rebuild', fallback=False)
         self.__scenario = self.Scenario(scenario_path)
 
     def __make_clean(self):
@@ -620,7 +624,7 @@ class Builder(BaseCommand):
             except Exception as e:
                 exit_with_error(_('Failed to remove packages: %s') % e)
 
-    def __make_build(self):
+    def __make_build(self, jobs, force_rebuild):
         def copy_files_to_builddir(dscfilepath, tmpdirpath):
             try:
                 files = Debhelper.get_sources_filelist(self._conf, dscfile=dscfilepath)
@@ -658,7 +662,7 @@ class Builder(BaseCommand):
                 if not package or not package.candidate.version == version:
                     logging.debug(_('Source package %s will be builded because missing binaries') % package_data.name)
                     return (dscfilepath, True)
-            if not self.__force_rebuild:
+            if not force_rebuild:
                 logging.info(_('Package %s already builded, spipped') % package_data.name)
                 return (dscfilepath, False)
             else:
@@ -690,7 +694,7 @@ class Builder(BaseCommand):
                 # Определяем зависимости
                 Debhelper.install_build_depends(tmpdirpath, package_data.name)
                 # Запускаем сборку
-                Debhelper.build_package(tmpdirpath, self._conf.logsdirpath, self.__jobs, package_data.options)
+                Debhelper.build_package(tmpdirpath, self._conf.logsdirpath, jobs, package_data.options)
                 # Копируем *.deb в репозиторий
                 Debhelper.copy_debs(tmpdirpath, self._conf.repodirpath)
                 # Обновляем репозиторий
@@ -698,10 +702,10 @@ class Builder(BaseCommand):
                 # Обновляем кэш
                 cache.update()
 
-    def run(self):
-        if self.__clean:
+    def run(self, jobs, force_rebuild, clean):
+        if clean:
             self.__make_clean()
-        self.__make_build()
+        self.__make_build(jobs, force_rebuild)
 
 
 class PackageType:
