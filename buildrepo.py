@@ -775,9 +775,9 @@ class RepoMaker(BaseCommand):
                 label = '%s %s (%s) %s' % (self.__name, self.__version, self.__codename, self.__get_arch())
                 os.chdir(os.path.join(self.__directory, '..'))
                 logging.info(_('Building iso %s for %s ...') % (isopath, self.__name))
-                Debhelper.run_command('genisoimage -r -J -o %s -V "%s" %s' % (isopath,
-                                                                              label,
-                                                                              self.__directory))
+                Debhelper.run_command('genisoimage --joliet-long -r -J -o %s -V "%s" %s' % (isopath,
+                                                                                            label,
+                                                                                            self.__directory))
             except Exception as e:
                 exit_with_error(_('Failed to make iso: %s') % e)
             finally:
@@ -1111,9 +1111,9 @@ class RepoMaker(BaseCommand):
             isopath = os.path.join(self._conf.isodirpath, isoname)
             label = '%s %s (sources)' % (self._conf.reponame, self._conf.repoversion)
             logging.info(_('Building sources iso %s for %s ...') % (isopath, self._conf.reponame))
-            Debhelper.run_command('genisoimage -r -J -o %s -V "%s" %s' % (isopath,
-                                                                          label,
-                                                                          tmpdir))
+            Debhelper.run_command('genisoimage --joliet-long -r -J -o %s -V "%s" %s' % (isopath,
+                                                                                        label,
+                                                                                        tmpdir))
         except Exception as e:
             exit_with_error(_('Failed to create source iso: %s') % e)
         finally:
