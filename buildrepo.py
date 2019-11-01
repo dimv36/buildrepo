@@ -529,8 +529,8 @@ class RepoInitializer(BaseCommand):
 class Builder(BaseCommand):
     cmd = COMMAND_BUILD
     args = (
-                ('--force-rebuild', {'required': False, 'action': 'store_true',
-                                     'default': False, 'help': _('Force rebuild')}),
+                ('--rebuild', {'required': False, 'action': 'append', 'default': [],
+                               'help': _('Specify package(s) for force rebuilding')}),
                 ('--clean', {'required': False, 'action': 'store_true',
                              'default': False, 'help': _('Remove installed packages on time of repo initializing')}),
                 ('--jobs', {'required': False, 'type': int, 'default': 2, 'help': _('Jobs count for building')})
@@ -615,7 +615,7 @@ class Builder(BaseCommand):
             except Exception as e:
                 exit_with_error(_('Failed to remove packages: %s') % e)
 
-    def __make_build(self, jobs, force_rebuild):
+    def __make_build(self, jobs, rebuild):
         def copy_files_to_builddir(dscfilepath, tmpdirpath):
             try:
                 files = Debhelper.get_sources_filelist(self._conf, dscfile=dscfilepath)
@@ -653,7 +653,7 @@ class Builder(BaseCommand):
                 if not package or not package.candidate.version == version:
                     logging.debug(_('Source package %s will be builded because missing binaries') % package_data.name)
                     return (dscfilepath, True)
-            if not force_rebuild:
+            if package_data.name not in rebuild:
                 logging.info(_('Package %s already builded, spipped') % package_data.name)
                 return (dscfilepath, False)
             else:
@@ -693,17 +693,19 @@ class Builder(BaseCommand):
                 # Обновляем кэш
                 cache.update()
 
-    def run(self, jobs, force_rebuild, clean):
+    def run(self, jobs, rebuild, clean):
         if clean:
             self.__make_clean()
-        self.__make_build(jobs, force_rebuild)
+        self.__make_build(jobs, rebuild)
 
 
 class PackageType:
     (PACKAGE_BUILDED,
      PACKAGE_FROM_OS_REPO,
+     PACKAGE_FROM_EXT_REPO,
      PACKAGE_FROM_OS_DEV_REPO,
-     PACKAGE_NOT_FOUND) = range(0, 4)
+     PACKAGE_FROM_EXT_DEV_REPO,
+     PACKAGE_NOT_FOUND) = range(0, 6)
 
 
 class RepoMaker(BaseCommand):
@@ -923,8 +925,7 @@ class RepoMaker(BaseCommand):
         maker = PackageCacheMaker(self._conf.conf_path)
         maker.run(mount_path=self._conf.repodirpath,
                   name='builded',
-                  primary=False,
-                  is_builded=True)
+                  ctype=PackageType.PACKAGE_BUILDED)
 
     def __load_caches(self):
         files = [f for f in os.listdir(self._conf.cachedirpath) if f.endswith('.cache')]
@@ -977,7 +978,9 @@ class RepoMaker(BaseCommand):
                                                   exclude_rules=self.__dev_packages_suffixes,
                                                   black_list=self.__packages.get('target-dev', []))
             unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
-            deps_in_dev = [d for d in deps if d[2] == PackageType.PACKAGE_FROM_OS_DEV_REPO]
+            deps_in_dev = [d for d in deps if d[2] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
+                                                       PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
+            print(unresolve)
             if len(unresolve):
                 for p in unresolve:
                     pkg = p[1]
@@ -1121,18 +1124,26 @@ class RepoMaker(BaseCommand):
 
 
 class PackageCacheMaker(BaseCommand):
+    CacheMapped = {
+        'os': PackageType.PACKAGE_FROM_OS_REPO,
+        'os-dev': PackageType.PACKAGE_FROM_OS_DEV_REPO,
+        'ext': PackageType.PACKAGE_FROM_EXT_REPO,
+        'ext-dev': PackageType.PACKAGE_FROM_EXT_DEV_REPO
+    }
     cmd = COMMAND_MAKE_PACKAGE_CACHE
     args = (
                 ('--mount-path', {'required': True, 'help': _('Set path to repo\'s mount point')}),
                 ('--name', {'required': True, 'help': _('Set package name of repo')}),
-                ('--primary', {'required': False, 'default': False, 'action': 'store_true',
-                 'help': _('Is primary repo?')})
+                ('--type', {'dest': 'ctype', 'required': True, 'choices': CacheMapped})
            )
     __DIRECTIVE_PACKAGE = 'Package: '
     __DIRECTIVE_VERSION = 'Version: '
     __DIRECTIVE_DESCRIPTION_ENDS = ''
 
-    def run(self, mount_path, name, primary, is_builded=False):
+    def run(self, mount_path, name, ctype):
+        if isinstance(ctype, str):
+            ctype = self.CacheMapped.get(ctype)
+        is_builded = (ctype == PackageType.PACKAGE_BUILDED)
         if not is_builded:
             packages_path = Debhelper.find_packages_files(mount_path)
         else:
@@ -1140,14 +1151,8 @@ class PackageCacheMaker(BaseCommand):
         if not len(packages_path):
             exit_with_error(_('Can\'t find any Packages files in %s') % mount_path)
         cache_file_path = '%s/%s.cache' % (self._conf.cachedirpath, name)
-        if is_builded:
-            cache_type = PackageType.PACKAGE_BUILDED
-        elif primary:
-            cache_type = PackageType.PACKAGE_FROM_OS_REPO
-        else:
-            cache_type = PackageType.PACKAGE_FROM_OS_DEV_REPO
         result = {DIRECTIVE_CACHE_NAME: name,
-                  DIRECTIVE_CACHE_TYPE: cache_type}
+                  DIRECTIVE_CACHE_TYPE: ctype}
         packages = []
         for path in packages_path:
             try:
