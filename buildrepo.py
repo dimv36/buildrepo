@@ -223,8 +223,9 @@ class Debhelper:
                 if pdep.installed:
                     if len(version) and apt_pkg.check_dep(pdep.installed.version, op, version):
                         return True, pdep.name
-                    # Зависимости по версии нет?
-                    return True, pdep.name
+                    elif not len(version):
+                        # Зависимости по версии нет?
+                        return True, pdep.name
                 # Теперь устанавливаем кандидата для установки
                 try:
                     pdep.candidate = pver_resolved
@@ -980,7 +981,6 @@ class RepoMaker(BaseCommand):
             unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
             deps_in_dev = [d for d in deps if d[2] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
                                                        PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
-            print(unresolve)
             if len(unresolve):
                 for p in unresolve:
                     pkg = p[1]
