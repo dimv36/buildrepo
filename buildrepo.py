@@ -655,7 +655,7 @@ class Builder(BaseCommand):
                     logging.debug(_('Source package %s will be builded because missing binaries') % package_data.name)
                     return (dscfilepath, True)
             if package_data.name not in rebuild:
-                logging.info(_('Package %s already builded, spipped') % package_data.name)
+                logging.info(_('Package %s already builded, skipped') % package_data.name)
                 return (dscfilepath, False)
             else:
                 logging.info(_('Rebuilding package %s') % package_data.name)
