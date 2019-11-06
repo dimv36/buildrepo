@@ -25,11 +25,6 @@ import configparser
 CURDIR = os.path.abspath(os.path.curdir)
 DEFAULT_BUILD_DIR = os.path.abspath(os.path.join(CURDIR, 'build'))
 DEFAULT_CONF = os.path.join(CURDIR, 'buildrepo.conf')
-COMMAND_INIT = 'init'
-COMMAND_BUILD = 'build'
-COMMAND_MAKE_REPO = 'make-repo'
-COMMAND_MAKE_PACKAGE_CACHE = 'make-package-cache'
-COMMAND_REMOVE_SOURCES = 'remove-sources'
 DEVNULL = open(os.devnull, 'wb')
 
 DEB_RE = '^(?P<name>[\w\-\.\+]+)_(?P<version>[\w\.\-\~\+]+)_(?P<arch>[\w]+)\.deb$'
@@ -464,6 +459,7 @@ class Configuration:
 
 class BaseCommand:
     cmd = None
+    alias = None
 
     def __init__(self, conf):
         if not os.path.exists(os.path.dirname(conf)):
@@ -476,7 +472,7 @@ class BaseCommand:
 
 
 class RepoInitializer(BaseCommand):
-    cmd = COMMAND_INIT
+    cmd = 'init'
     """
     Класс выполняет подготовку при инициализации репозитория
     """
@@ -532,7 +528,7 @@ class RepoInitializer(BaseCommand):
 
 
 class Builder(BaseCommand):
-    cmd = COMMAND_BUILD
+    cmd = 'build'
     args = (
                 ('--rebuild', {'required': False, 'action': 'append', 'default': [],
                                'help': _('Specify package(s) for force rebuilding')}),
@@ -713,8 +709,183 @@ class PackageType:
      PACKAGE_NOT_FOUND) = range(0, 6)
 
 
-class RepoMaker(BaseCommand):
-    cmd = COMMAND_MAKE_REPO
+class DependencyFinder:
+    def __init__(self, package, caches, conf, exclude_rules=None, black_list=[]):
+        self.deps = list()
+        self.__caches = caches
+        self.__package = cache.get(package)
+        self.__exclude_rules = exclude_rules
+        self.__black_list = black_list
+        self.__conf = conf
+        if self.__package is None:
+            exit_with_error(_('Package %s does not exists') % package)
+        self.deps.append((self.__package.name, self.__package,
+                          self.__get_package_repository(self.__package, self.__package.name)))
+        self.__deps_recurse(self.deps, self.__package)
+
+    def __get_package_repository(self, package, required_by):
+        package_name, package_ver = package.name, package.versions[0].version
+        for cache in self.__caches:
+            cache_name = cache[DIRECTIVE_CACHE_NAME]
+            for p in cache[DIRECTIVE_CACHE_PACKAGES]:
+                if p['name'] == package_name and p['version'] == package_ver:
+                    logging.debug(_('%s -> %s(%s) found in %s repo') % (required_by,
+                                                                        package_name,
+                                                                        package_ver,
+                                                                        cache_name))
+                    return cache[DIRECTIVE_CACHE_TYPE]
+        return PackageType.PACKAGE_NOT_FOUND
+
+    def __process_exclude_filters(self, s, p):
+        if self.__exclude_rules is not None:
+            candidate = p.versions[0]
+            package_name, package_ver = candidate.source_name, fix_package_version(candidate.source_version)
+            dscfilepath = '%s/%s_%s.dsc' % (self.__conf.srcdirpath, package_name, package_ver)
+            try:
+                dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
+                for binary in dscfile.binaries:
+                    skip_package = False
+                    for exl in self.__exclude_rules:
+                        if binary.endswith(exl):
+                            skip_package = True
+                            break
+                    if not skip_package:
+                        paddition = cache.get(binary)
+                        if not paddition:
+                            exit_with_error(_('Package %s does not exists') % paddition)
+                        # Black list
+                        if binary not in self.__black_list:
+                            item = (paddition.name, paddition,
+                                    self.__get_package_repository(paddition, paddition))
+                            if item not in s:
+                                s.append(item)
+                                self.__deps_recurse(s, paddition)
+                        else:
+                            logging.info(_('Package %s skipped because blacklist rule') % binary)
+                    else:
+                        logging.debug(_('Package %s skipped because \'%s\' rule') % (
+                            binary, ' '.join(self.__exclude_rules)))
+            except apt_pkg.Error as e:
+                exit_with_error(e)
+
+    def __deps_recurse(self, s, p):
+        deps = p.candidate.get_dependencies('Depends')
+        pre_deps = p.candidate.get_dependencies('PreDepends')
+        all_deps = deps + pre_deps
+        pdest = None
+        for i in all_deps:
+            dp = i.target_versions
+            if len(dp) > 0:
+                package = dp[0].package
+                pdest = self.__get_package_repository(package, p.name)
+                item = (p.name, package, pdest)
+                if item not in s:
+                    s.append(item)
+                    self.__deps_recurse(s, package)
+            else:
+                # Пакета нет в кэше
+                depname = str(i).split(':')[1].strip()
+                pdest = PackageType.PACKAGE_NOT_FOUND
+                s.append((p.name, depname, PackageType.PACKAGE_NOT_FOUND,))
+        # TODO:: Получить исходник, пройти по всем бинарникам и проанализировать
+        # зависимости всех остальных бинарных пакетов, собираемых в рамках текущего исходника
+        # if pdest == PackageType.PACKAGE_BUILDED:
+        #     self.__process_exclude_filters(s, p)
+
+
+class _RepoAnalyzer(BaseCommand):
+    _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
+    alias = 'binary-repo'
+
+    def __init__(self, conf_path):
+        super().__init__(conf_path)
+        self._white_list_path = self._conf.parser.get(_RepoAnalyzer.alias, 'white-list', fallback=None)
+        self.__no_create_iso = self._conf.parser.getboolean(RepoMaker.cmd, 'no-create-iso', fallback=False)
+        self._dev_packages_suffixes = self._conf.parser.get(_RepoAnalyzer.alias, 'dev-package-suffixes',
+                                                            fallback=RepoMaker._DEFAULT_DEV_PACKAGES_SUFFIXES)
+        if not self._white_list_path:
+            exit_with_error(_('White list does not specified in %s') % self._conf.conf_path)
+        if not os.path.exists(self._white_list_path):
+            exit_with_error(_('File %s does not exist') % self.__white_list_path)
+        if isinstance(self._dev_packages_suffixes, str):
+            self._dev_packages_suffixes = [item.strip() for item in self._dev_packages_suffixes.split(',')]
+        logging.info(_('Using %s rule for packages for 2nd disk') % ', '.join(self._dev_packages_suffixes))
+        self._packages = {}
+        self._caches = []
+        self.__build_cache_of_builded_packages()
+        self.__load_caches()
+        self.__parse_white_list()
+
+    def __parse_white_list(self):
+        i = 1
+        last_section = None
+        for line in open(self._white_list_path, mode='r').readlines():
+            i += 1
+            if line.startswith('#') or line == '\n':
+                continue
+            line = line.rstrip('\n')
+            if line.startswith('[') and line.endswith(']'):
+                last_section = line[1:-1]
+                self._packages[last_section] = []
+            else:
+                if last_section is None:
+                    exit_with_error(_('Got package at line %d, '
+                                      'but section expected') % i)
+                packages = self.__packages.get(last_section)
+                if line in packages:
+                    logging.warn(_('Package %s already in %s, skipped'), line, last_section)
+                    continue
+                packages.append(line)
+                self._packages[last_section] = packages
+        if 'target' not in self._packages:
+            exit_with_error(_('White list for target repository is empty'))
+        # Проверка на пересечение
+        all_pkgs = set()
+        for section, packages in self._packages.items():
+            if not len(all_pkgs):
+                all_pkgs = set(packages)
+                continue
+            if (all_pkgs & set(packages)):
+                exit_with_error(_('Intersection is found in lists'))
+
+    def __build_cache_of_builded_packages(self):
+        logging.info(_('Build cache for builded packages ...'))
+        maker = PackageCacheMaker(self._conf.conf_path)
+        maker.run(mount_path=self._conf.repodirpath,
+                  name='builded',
+                  ctype=PackageType.PACKAGE_BUILDED)
+
+    def __load_caches(self):
+        files = [f for f in os.listdir(self._conf.cachedirpath) if f.endswith('.cache')]
+        if len(files) <= 1:
+            exit_with_error(_('No one cache is created'))
+        for f in files:
+            path = os.path.join(self._conf.cachedirpath, f)
+            with open(path, mode='r') as json_data:
+                self._caches.append(json.load(json_data))
+        os_repo_exists = any([cache[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_FROM_OS_REPO
+                             for cache in self._caches])
+        if not os_repo_exists:
+            exit_with_error(_('Cache for OS repo is needed'))
+        os_dev_repo_exists = any([cache[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_FROM_OS_DEV_REPO
+                                 for cache in self._caches])
+        if not os_dev_repo_exists:
+            exit_with_error(_('Cache for OS dev repo is needed'))
+        self.__caches = sorted(self._caches, key=lambda c: c[DIRECTIVE_CACHE_TYPE])
+
+    def _get_depends_for_package(self, package, exclude_rules=None, black_list=None):
+        depfinder = DependencyFinder(package,
+                                     self.__caches,
+                                     self._conf,
+                                     exclude_rules, black_list)
+        return depfinder.deps
+
+
+class RepoMaker(_RepoAnalyzer):
+    cmd = 'make-repo'
+    args = (
+                ('--no-create-iso', {'required': False, 'help': _('Skip ISO creation')}),
+           )
 
     class IsoRepositoryMaker:
         def __init__(self, name, version, is_dev):
@@ -790,174 +961,13 @@ class RepoMaker(BaseCommand):
             finally:
                 os.chdir(CURDIR)
 
-    class DependencyFinder:
-        def __init__(self, package, caches, conf, exclude_rules=None, black_list=[]):
-            self.deps = list()
-            self.__caches = caches
-            self.__package = cache.get(package)
-            self.__exclude_rules = exclude_rules
-            self.__black_list = black_list
-            self.__conf = conf
-            if self.__package is None:
-                exit_with_error(_('Package %s does not exists') % package)
-            self.deps.append((self.__package.name, self.__package,
-                              self.__get_package_repository(self.__package, self.__package.name)))
-            self.__deps_recurse(self.deps, self.__package)
-
-        def __get_package_repository(self, package, required_by):
-            package_name, package_ver = package.name, package.versions[0].version
-            for cache in self.__caches:
-                cache_name = cache[DIRECTIVE_CACHE_NAME]
-                for p in cache[DIRECTIVE_CACHE_PACKAGES]:
-                    if p['name'] == package_name and p['version'] == package_ver:
-                        logging.debug(_('%s -> %s(%s) found in %s repo') % (required_by,
-                                                                            package_name,
-                                                                            package_ver,
-                                                                            cache_name))
-                        return cache[DIRECTIVE_CACHE_TYPE]
-            return PackageType.PACKAGE_NOT_FOUND
-
-        def __process_exclude_filters(self, s, p):
-            if self.__exclude_rules is not None:
-                candidate = p.versions[0]
-                package_name, package_ver = candidate.source_name, fix_package_version(candidate.source_version)
-                dscfilepath = '%s/%s_%s.dsc' % (self.__conf.srcdirpath, package_name, package_ver)
-                try:
-                    dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
-                    for binary in dscfile.binaries:
-                        skip_package = False
-                        for exl in self.__exclude_rules:
-                            if binary.endswith(exl):
-                                skip_package = True
-                                break
-                        if not skip_package:
-                            paddition = cache.get(binary)
-                            if not paddition:
-                                exit_with_error(_('Package %s does not exists') % paddition)
-                            # Black list
-                            if binary not in self.__black_list:
-                                item = (paddition.name, paddition,
-                                        self.__get_package_repository(paddition, paddition))
-                                if item not in s:
-                                    s.append(item)
-                                    self.__deps_recurse(s, paddition)
-                            else:
-                                logging.info(_('Package %s skipped because blacklist rule') % binary)
-                        else:
-                            logging.debug(_('Package %s skipped because \'%s\' rule') % (
-                                binary, ' '.join(self.__exclude_rules)))
-                except apt_pkg.Error as e:
-                    exit_with_error(e)
-
-        def __deps_recurse(self, s, p):
-            deps = p.candidate.get_dependencies('Depends')
-            pre_deps = p.candidate.get_dependencies('PreDepends')
-            all_deps = deps + pre_deps
-            pdest = None
-            for i in all_deps:
-                dp = i.target_versions
-                if len(dp) > 0:
-                    package = dp[0].package
-                    pdest = self.__get_package_repository(package, p.name)
-                    item = (p.name, package, pdest)
-                    if item not in s:
-                        s.append(item)
-                        self.__deps_recurse(s, package)
-                else:
-                    # Пакета нет в кэше
-                    depname = str(i).split(':')[1].strip()
-                    pdest = PackageType.PACKAGE_NOT_FOUND
-                    s.append((p.name, depname, PackageType.PACKAGE_NOT_FOUND,))
-            if pdest == PackageType.PACKAGE_BUILDED:
-                self.__process_exclude_filters(s, p)
-
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
 
     def __init__(self, conf_path):
         super().__init__(conf_path)
-        self.__white_list_path = self._conf.parser.get(RepoMaker.cmd, 'white-list', fallback=None)
-        self.__no_create_iso = self._conf.parser.getboolean(RepoMaker.cmd, 'no-create-iso', fallback=False)
-        self.__dev_packages_suffixes = self._conf.parser.get(RepoMaker.cmd, 'dev-package-suffixes',
-                                                             fallback=RepoMaker._DEFAULT_DEV_PACKAGES_SUFFIXES)
-        if not self.__white_list_path:
-            exit_with_error(_('White list does not specified in %s') % self._conf.conf_path)
-        if not os.path.exists(self.__white_list_path):
-            exit_with_error(_('File %s does not exist') % self.__white_list_path)
-        if isinstance(self.__dev_packages_suffixes, str):
-            self.__dev_packages_suffixes = [item.strip() for item in self.__dev_packages_suffixes.split(',')]
-        logging.info(_('Using %s rule for packages for 2nd disk') % ', '.join(self.__dev_packages_suffixes))
-        self.__packages = {}
-        self.__caches = []
-        self.__sources = {}
-        self.__build_cache_of_builded_packages()
-        self.__load_caches()
-        self.__parse_white_list()
+        self.__no_create_iso = self._conf.parser.get(_RepoAnalyzer.alias, 'no-create-iso', fallback=False)
 
-    def __parse_white_list(self):
-        i = 1
-        last_section = None
-        for line in open(self.__white_list_path, mode='r').readlines():
-            i += 1
-            if line.startswith('#') or line == '\n':
-                continue
-            line = line.rstrip('\n')
-            if line.startswith('[') and line.endswith(']'):
-                last_section = line[1:-1]
-                self.__packages[last_section] = []
-            else:
-                if last_section is None:
-                    exit_with_error(_('Got package at line %d, '
-                                      'but section expected') % i)
-                packages = self.__packages.get(last_section)
-                if line in packages:
-                    logging.warn(_('Package %s already in %s, skipped'), line, last_section)
-                    continue
-                packages.append(line)
-                self.__packages[last_section] = packages
-        if 'target' not in self.__packages:
-            exit_with_error(_('White list for target repository is empty'))
-        # Проверка на пересечение
-        all_pkgs = set()
-        for section, packages in self.__packages.items():
-            if not len(all_pkgs):
-                all_pkgs = set(packages)
-                continue
-            if (all_pkgs & set(packages)):
-                exit_with_error(_('Intersection is found in lists'))
-
-    def __build_cache_of_builded_packages(self):
-        logging.info(_('Build cache for builded packages ...'))
-        maker = PackageCacheMaker(self._conf.conf_path)
-        maker.run(mount_path=self._conf.repodirpath,
-                  name='builded',
-                  ctype=PackageType.PACKAGE_BUILDED)
-
-    def __load_caches(self):
-        files = [f for f in os.listdir(self._conf.cachedirpath) if f.endswith('.cache')]
-        if len(files) <= 1:
-            exit_with_error(_('No one cache is created'))
-        for f in files:
-            path = os.path.join(self._conf.cachedirpath, f)
-            with open(path, mode='r') as json_data:
-                self.__caches.append(json.load(json_data))
-        os_repo_exists = any([cache[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_FROM_OS_REPO
-                             for cache in self.__caches])
-        if not os_repo_exists:
-            exit_with_error(_('Cache for OS repo is needed'))
-        os_dev_repo_exists = any([cache[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_FROM_OS_DEV_REPO
-                                 for cache in self.__caches])
-        if not os_dev_repo_exists:
-            exit_with_error(_('Cache for OS dev repo is needed'))
-        self.__caches = sorted(self.__caches, key=lambda c: c[DIRECTIVE_CACHE_TYPE])
-
-    def __get_depends_for_package(self, package, exclude_rules=None, black_list=None):
-        depfinder = self.DependencyFinder(package,
-                                          self.__caches,
-                                          self._conf,
-                                          exclude_rules, black_list)
-        return depfinder.deps
-
-    def run(self):
+    def run(self, no_create_iso):
         def get_deb_dev_to_copy(pkgs):
             filenames = set()
             for pkg in pkgs:
@@ -977,11 +987,11 @@ class RepoMaker(BaseCommand):
         # Анализ пакетов основного репозитория
         target_builded_deps = set()
         sources = dict()
-        for required in self.__packages['target']:
+        for required in self._packages['target']:
             logging.info(_('Processing %s ...') % required)
-            deps = self.__get_depends_for_package(required,
-                                                  exclude_rules=self.__dev_packages_suffixes,
-                                                  black_list=self.__packages.get('target-dev', []))
+            deps = self._get_depends_for_package(required,
+                                                 exclude_rules=self.__dev_packages_suffixes,
+                                                 black_list=self.__packages.get('target-dev', []))
             unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
             deps_in_dev = [d for d in deps if d[2] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
                                                        PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
@@ -1041,10 +1051,10 @@ class RepoMaker(BaseCommand):
             if m:
                 package_name = m.group('name')
                 dev_packages.append(package_name)
-        dev_packages = sorted([p for p in set(dev_packages) - set(self.__packages['target'])])
+        dev_packages = sorted([p for p in set(dev_packages) - set(self._packages['target'])])
         for devpkg in dev_packages:
             logging.info(_('Processing %s ...') % devpkg)
-            deps = self.__get_depends_for_package(devpkg)
+            deps = self._get_depends_for_package(devpkg)
             unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
             if len(unresolve):
                 for p in unresolve:
@@ -1054,7 +1064,7 @@ class RepoMaker(BaseCommand):
                     else:
                         depstr = _('%s version %s') % (pkg.name, pkg.versions[0].version)
                     logging.error(_('Could not resolve %s for %s: %s') %
-                                   ('dependency' if p[0] == required else 'subdependency',
+                                   ('dependency' if p[0] == devpkg else 'subdependency',
                                     devpkg, depstr))
                 exit_with_error(_('Could not resolve dependencies'))
             builded = [d for d in deps if d[2] == PackageType.PACKAGE_BUILDED]
@@ -1094,7 +1104,7 @@ class RepoMaker(BaseCommand):
                     shutil.copyfile(source, dst)
                 except Exception as e:
                     exit_with_error(e)
-        if self.__no_create_iso:
+        if no_create_iso:
             return
         # Создаем репозиторий (main и dev)
         for is_dev in (False, True):
@@ -1134,7 +1144,7 @@ class PackageCacheMaker(BaseCommand):
         'ext': PackageType.PACKAGE_FROM_EXT_REPO,
         'ext-dev': PackageType.PACKAGE_FROM_EXT_DEV_REPO
     }
-    cmd = COMMAND_MAKE_PACKAGE_CACHE
+    cmd = 'make-package-cache'
     args = (
                 ('--mount-path', {'required': True, 'help': _('Set path to repo\'s mount point')}),
                 ('--name', {'required': True, 'help': _('Set package name of repo')}),
@@ -1187,7 +1197,7 @@ class PackageCacheMaker(BaseCommand):
 
 
 class RemoveSourceCmd(BaseCommand):
-    cmd = COMMAND_REMOVE_SOURCES
+    cmd = 'remove-sources'
     args = (
                 ('--package', {'required': True, 'help': _('Source package name to be removed')}),
                 ('--remove-orig', {'dest': 'remove_orig', 'action': 'store_true',
@@ -1247,6 +1257,48 @@ class RemoveSourceCmd(BaseCommand):
             except OSError as e:
                 exit_with_error(_('Failed to remove file %s: %s' % (f, e)))
         Debhelper.generate_packages_list(self._conf.repodirpath)
+
+
+class RepoRuntimeDepsAnalyzer(_RepoAnalyzer):
+    cmd = 'check-runtime-deps'
+
+    def __init__(self, conf_path):
+        super().__init__(conf_path)
+        self._mycache = self._caches[0]
+
+    def _cache_type_str(self, cache_type):
+        for c in self.__caches:
+            if c[DIRECTIVE_CACHE_TYPE] == cache_type:
+                return c[DIRECTIVE_CACHE_NAME]
+        return '<UNKNOWN>'
+
+    def run(self):
+        for pkg_data in self._mycache[DIRECTIVE_CACHE_PACKAGES]:
+            current_package = pkg_data[DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME]
+            logging.info(_('Processing %s ...') % current_package)
+            deps = self._get_depends_for_package(current_package)
+            unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
+            deps_in_dev = [d for d in deps if d[2] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
+                                                       PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
+            if len(unresolve):
+                for p in unresolve:
+                    pkg = p[1]
+                    if isinstance(pkg, str):
+                        depstr = pkg
+                    else:
+                        depstr = _('%s version %s') % (pkg.name, pkg.versions[0].version)
+                    logging.error(_('Could not resolve %s for %s: %s') %
+                                   ('dependency' if p[0] == current_package else 'subdependency',
+                                    current_package, depstr))
+                exit_with_error(_('Could not resolve dependencies'))
+            if len(deps_in_dev):
+                for p in deps_in_dev:
+                    unused, pkg, cache_type = p
+                    package_name, package_ver = pkg.name, pkg.versions[0].version
+                    logging.error(_('%s %s (%s) for %s is founded in %s repo') %
+                                   ('Dependency' if p[0] == current_package else 'Subdependency',
+                                    package_name, package_ver, p[0], self._cache_type_str(cache_type)))
+                exit_with_error(_('Could not resolve dependencies'))
 
 
 def make_default_subparser(main_parser, command):
