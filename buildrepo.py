@@ -884,7 +884,7 @@ class _RepoAnalyzer(BaseCommand):
                                      exclude_rules, black_list)
         return depfinder.deps
 
-    def _emit_unresolved(self, current_package, unresolve):
+    def _emit_unresolved(self, current_package, unresolve, exit=True):
         for p in unresolve:
             binary, dependency, unused = p
             depname = str()
@@ -893,7 +893,8 @@ class _RepoAnalyzer(BaseCommand):
             elif isinstance(dependency, str):
                 depname = dependency
             logging.error(_('%s depends on %s') % (binary, depname))
-        exit_with_error(_('Could not resolve dependencies'))
+        if exit:
+            exit_with_error(_('Could not resolve dependencies'))
 
     def _cache_type_str(self, cache_type):
         for c in self.__caches:
@@ -901,14 +902,45 @@ class _RepoAnalyzer(BaseCommand):
                 return c[DIRECTIVE_CACHE_NAME]
         return '<UNKNOWN>'
 
-    def _emit_resolved_in_dev(self, current_package, deps_in_dev):
+    def _emit_resolved_in_dev(self, current_package, deps_in_dev, exit=True):
         for p in deps_in_dev:
             unused, pkg, cache_type = p
             package_name, package_ver = pkg.name, pkg.versions[0].version
             logging.error(_('%s %s (%s) for %s is founded in %s repo') %
                            ('Dependency' if p[0] == current_package else 'Subdependency',
                             package_name, package_ver, p[0], self._cache_type_str(cache_type)))
-        exit_with_error(_('Could not resolve dependencies'))
+        if exit:
+            exit_with_error(_('Could not resolve dependencies'))
+
+    def _emit_deps_summary(self, all_unresolved, all_in_dev):
+        def sort_deps(deps):
+            res = {}
+            for dep_info in deps:
+                req, dependency, unused = dep_info
+                req_values = res.get(req, [])
+                depname = str()
+                if isinstance(dependency, apt.package.Package):
+                    depname = dependency.name
+                elif isinstance(dependency, str):
+                    depname = dependency
+                req_values.append(depname)
+                req_values = list(set(req_values))
+                res[req] = req_values
+            return res
+
+        def print_items(deps):
+            for dep, requirements in deps.items():
+                print(_('Package %s:') % dep)
+                for req in requirements:
+                    print('\t%s' % req)
+
+        unresolved_hash = sort_deps(all_unresolved)
+        print(_('***** Unresolved ***** :'))
+        print_items(unresolved_hash)
+        in_dev_hash = sort_deps(all_in_dev)
+        print(_('***** Found in dev: *****'))
+        print_items(in_dev_hash)
+        logging.info(_('Summary: unresolved: %d, deps in dev: %d') % (len(all_unresolved), len(all_in_dev)))
 
 
 class RepoMaker(_RepoAnalyzer):
@@ -1283,6 +1315,8 @@ class RepoRuntimeDepsAnalyzer(_RepoAnalyzer):
         self._mycache = [c for c in self._caches if c[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_BUILDED][0]
 
     def run(self):
+        all_unresolved = []
+        all_in_dev = []
         for pkg_data in self._mycache[DIRECTIVE_CACHE_PACKAGES]:
             current_package = pkg_data[DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME]
             logging.info(_('Processing %s ...') % current_package)
@@ -1290,10 +1324,16 @@ class RepoRuntimeDepsAnalyzer(_RepoAnalyzer):
             unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
             deps_in_dev = [d for d in deps if d[2] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
                                                        PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
-            if len(unresolve):
-                self._emit_unresolved(current_package, unresolve)
-            if len(deps_in_dev):
-                self._emit_resolved_in_dev(current_package, deps_in_dev)
+            for dep in deps:
+                deptype = dep
+                if deptype == PackageType.PACKAGE_NOT_FOUND:
+                    all_unresolved.append(dep)
+                elif deptype in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
+                                 PackageType.PACKAGE_FROM_EXT_DEV_REPO):
+                    all_in_dev.append(dep)
+            all_unresolved += list(unresolve)
+            all_in_dev += list(deps_in_dev)
+        self._emit_deps_summary(all_unresolved, all_in_dev)
 
 
 def make_default_subparser(main_parser, command):
