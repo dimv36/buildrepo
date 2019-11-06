@@ -1280,7 +1280,7 @@ class RepoRuntimeDepsAnalyzer(_RepoAnalyzer):
 
     def __init__(self, conf_path):
         super().__init__(conf_path)
-        self._mycache = self._caches[0]
+        self._mycache = [c for c in self._caches if c[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_BUILDED][0]
 
     def run(self):
         for pkg_data in self._mycache[DIRECTIVE_CACHE_PACKAGES]:
