@@ -79,6 +79,10 @@ def fix_package_version(pver):
     return pver
 
 
+def remove_list_dublicates(plist):
+    return list(dict.fromkeys(plist))
+
+
 class Debhelper:
     """
     Класс для запуска Debian утилит
@@ -880,6 +884,32 @@ class _RepoAnalyzer(BaseCommand):
                                      exclude_rules, black_list)
         return depfinder.deps
 
+    def _emit_unresolved(self, current_package, unresolve):
+        for p in unresolve:
+            binary, dependency, unused = p
+            depname = str()
+            if isinstance(dependency, apt.package.Package):
+                depname = dependency.name
+            elif isinstance(dependency, str):
+                depname = dependency
+            logging.error(_('%s depends on %s') % (binary, depname))
+        exit_with_error(_('Could not resolve dependencies'))
+
+    def _cache_type_str(self, cache_type):
+        for c in self.__caches:
+            if c[DIRECTIVE_CACHE_TYPE] == cache_type:
+                return c[DIRECTIVE_CACHE_NAME]
+        return '<UNKNOWN>'
+
+    def _emit_resolved_in_dev(self, current_package, deps_in_dev):
+        for p in deps_in_dev:
+            unused, pkg, cache_type = p
+            package_name, package_ver = pkg.name, pkg.versions[0].version
+            logging.error(_('%s %s (%s) for %s is founded in %s repo') %
+                           ('Dependency' if p[0] == current_package else 'Subdependency',
+                            package_name, package_ver, p[0], self._cache_type_str(cache_type)))
+        exit_with_error(_('Could not resolve dependencies'))
+
 
 class RepoMaker(_RepoAnalyzer):
     cmd = 'make-repo'
@@ -996,24 +1026,9 @@ class RepoMaker(_RepoAnalyzer):
             deps_in_dev = [d for d in deps if d[2] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
                                                        PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
             if len(unresolve):
-                for p in unresolve:
-                    pkg = p[1]
-                    if isinstance(pkg, str):
-                        depstr = pkg
-                    else:
-                        depstr = _('%s version %s') % (pkg.name, pkg.versions[0].version)
-                    logging.error(_('Could not resolve %s for %s: %s') %
-                                   ('dependency' if p[0] == required else 'subdependency',
-                                    required, depstr))
-                exit_with_error(_('Could not resolve dependencies'))
+                self._emit_unresolved(required, unresolve)
             if len(deps_in_dev):
-                for p in deps_in_dev:
-                    pkg = p[1]
-                    package_name, package_ver = pkg.name, pkg.versions[0].version
-                    logging.error(_('%s %s (%s) for %s is founded in os-dev repo') %
-                                   ('Dependency' if p[0] == required else 'Subdependency',
-                                    package_name, package_ver, p[0]))
-                exit_with_error(_('Could not resolve dependencies'))
+                self._emit_resolved_in_dev(required, deps_in_dev)
             target_deps = [d for d in deps if d[2] == PackageType.PACKAGE_BUILDED]
             for p in target_deps:
                 package = p[1]
@@ -1057,6 +1072,7 @@ class RepoMaker(_RepoAnalyzer):
             deps = self._get_depends_for_package(devpkg)
             unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
             if len(unresolve):
+                self._emit_unresolved(devpkg, unresolve)
                 for p in unresolve:
                     pkg = p[1]
                     if isinstance(pkg, str):
@@ -1266,12 +1282,6 @@ class RepoRuntimeDepsAnalyzer(_RepoAnalyzer):
         super().__init__(conf_path)
         self._mycache = self._caches[0]
 
-    def _cache_type_str(self, cache_type):
-        for c in self.__caches:
-            if c[DIRECTIVE_CACHE_TYPE] == cache_type:
-                return c[DIRECTIVE_CACHE_NAME]
-        return '<UNKNOWN>'
-
     def run(self):
         for pkg_data in self._mycache[DIRECTIVE_CACHE_PACKAGES]:
             current_package = pkg_data[DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME]
@@ -1281,24 +1291,9 @@ class RepoRuntimeDepsAnalyzer(_RepoAnalyzer):
             deps_in_dev = [d for d in deps if d[2] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
                                                        PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
             if len(unresolve):
-                for p in unresolve:
-                    pkg = p[1]
-                    if isinstance(pkg, str):
-                        depstr = pkg
-                    else:
-                        depstr = _('%s version %s') % (pkg.name, pkg.versions[0].version)
-                    logging.error(_('Could not resolve %s for %s: %s') %
-                                   ('dependency' if p[0] == current_package else 'subdependency',
-                                    current_package, depstr))
-                exit_with_error(_('Could not resolve dependencies'))
+                self._emit_unresolved(current_package, unresolve)
             if len(deps_in_dev):
-                for p in deps_in_dev:
-                    unused, pkg, cache_type = p
-                    package_name, package_ver = pkg.name, pkg.versions[0].version
-                    logging.error(_('%s %s (%s) for %s is founded in %s repo') %
-                                   ('Dependency' if p[0] == current_package else 'Subdependency',
-                                    package_name, package_ver, p[0], self._cache_type_str(cache_type)))
-                exit_with_error(_('Could not resolve dependencies'))
+                self._emit_resolved_in_dev(current_package, deps_in_dev)
 
 
 def make_default_subparser(main_parser, command):
