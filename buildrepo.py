@@ -222,21 +222,26 @@ class Debhelper:
                 # Проверяем, установлен ли пакет
                 if pdep.installed:
                     if len(version) and apt_pkg.check_dep(pdep.installed.version, op, version):
+                        logging.info(_('Package %s already installed') % pdep.installed)
                         return True, pdep.name
                     elif not len(version):
                         # Зависимости по версии нет?
+                        logging.info(_('Package %s already installed') % pdep.installed)
                         return True, pdep.name
                 # Теперь устанавливаем кандидата для установки
                 try:
                     pdep.candidate = pver_resolved
                     logging.info(_('Installing %s ...') % pdep.candidate)
                     pdep.mark_install()
+                    # TODO:: Получить список пакетов, которые установить невозможно
                     cache.commit()
-                    return True, pdep.name
+                    cache.open()
+                    # Поскольку мы указали версию на установку, то нам теперь достаточно проверить
+                    # факт установки пакета
+                    pdeps = [cache.get(pdep.name)] or cache.get_providing_packages(pdep.name)
+                    return any([pdep.installed for pdep in pdeps]), pdep.name
                 except apt_pkg.Error as e:
                     logging.error(_('Failed to install %s: %s') % (pdep.candidate, e))
-                finally:
-                    cache.open()
             return False, None
 
         def form_depends(depends):
@@ -282,8 +287,7 @@ class Debhelper:
                 # Обыкновенная зависимость
                 res, installed_package = install_package_or_providing(dep[0], pkgname)
                 if not res:
-                    exit_with_error(_('Failed to install package %s') % (
-                                    installed_package if installed_package else pkgname))
+                    exit_with_error(_('Failed to install dependencies for %s') % pkgname)
             else:
                 # Альтернативные зависимости
                 alt_installed = False
