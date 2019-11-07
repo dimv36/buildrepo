@@ -835,7 +835,7 @@ class _RepoAnalyzer(BaseCommand):
                 if last_section is None:
                     exit_with_error(_('Got package at line %d, '
                                       'but section expected') % i)
-                packages = self.__packages.get(last_section)
+                packages = self._packages.get(last_section)
                 if line in packages:
                     logging.warn(_('Package %s already in %s, skipped'), line, last_section)
                     continue
@@ -1052,8 +1052,8 @@ class RepoMaker(_RepoAnalyzer):
         for required in self._packages['target']:
             logging.info(_('Processing %s ...') % required)
             deps = self._get_depends_for_package(required,
-                                                 exclude_rules=self.__dev_packages_suffixes,
-                                                 black_list=self.__packages.get('target-dev', []))
+                                                 exclude_rules=self._dev_packages_suffixes,
+                                                 black_list=self._packages.get('target-dev', []))
             unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
             deps_in_dev = [d for d in deps if d[2] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
                                                        PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
