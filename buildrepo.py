@@ -714,13 +714,18 @@ class PackageType:
 
 
 class DependencyFinder:
-    def __init__(self, package, caches, conf, exclude_rules=None, black_list=[]):
+    FLAG_FINDER_MAIN = 1 << 0
+    FLAG_FINDER_DEV = 1 << 1
+
+    def __init__(self, package, caches, conf,
+                 exclude_rules=None, black_list=[], flags=DependencyFinder.FLAG_FINDER_MAIN):
         self.deps = list()
         self.__caches = caches
         self.__package = cache.get(package)
         self.__exclude_rules = exclude_rules
         self.__black_list = black_list
         self.__conf = conf
+        self.__flags = flags
         if self.__package is None:
             exit_with_error(_('Package %s does not exists') % package)
         self.deps.append((self.__package.name, self.__package,
@@ -772,6 +777,13 @@ class DependencyFinder:
             except apt_pkg.Error as e:
                 exit_with_error(e)
 
+    # TODO: Создать отдельный объект для кэша
+    def _cache_type_str(self, cache_type):
+        for c in self.__caches:
+            if c[DIRECTIVE_CACHE_TYPE] == cache_type:
+                return c[DIRECTIVE_CACHE_NAME]
+        return '<UNKNOWN>'
+
     def __deps_recurse(self, s, p):
         deps = p.candidate.get_dependencies('Depends')
         pre_deps = p.candidate.get_dependencies('PreDepends')
@@ -779,18 +791,39 @@ class DependencyFinder:
         pdest = None
         for i in all_deps:
             dp = i.target_versions
-            if len(dp) > 0:
+            if not len(dp):
+                # Пакета нет в кэше
+                depname = str(i).split(':')[1].strip()
+                pdest = PackageType.PACKAGE_NOT_FOUND
+                s.append((p.name, depname, PackageType.PACKAGE_NOT_FOUND,))
+            elif len(dp) == 1:
+                # Обычная зависимость?
                 package = dp[0].package
                 pdest = self.__get_package_repository(package, p.name)
                 item = (p.name, package, pdest)
                 if item not in s:
                     s.append(item)
                     self.__deps_recurse(s, package)
-            else:
-                # Пакета нет в кэше
-                depname = str(i).split(':')[1].strip()
-                pdest = PackageType.PACKAGE_NOT_FOUND
-                s.append((p.name, depname, PackageType.PACKAGE_NOT_FOUND,))
+            elif len(dp) > 1:
+                # Альтернативная зависимость
+                item = None
+                for dpitem in dp:
+                    pdest = self.__get_package_repository(dpitem.package, p.name)
+                    logging.debug(_('Alternative dependency %s for %s found in %s repo') % (
+                        dpitem.package.name, p.name, self._cache_type_str(pdest)))
+                    if pdest in (PackageType.PACKAGE_BUILDED, PackageType.PACKAGE_FROM_OS_REPO):
+                        item = (p.name, dpitem.package, pdest)
+                        if item not in s:
+                            s.append(item)
+                            self.__deps_recurse(s, dpitem.package)
+                        break
+                if self.__flags & DependencyFinder.FLAG_FINDER_MAIN and not item:
+                    # Мы не смогли удовлетворить альтеранитивные зависимости. Добавляем последнюю
+                    item = (p.name, dp[-1].package, pdest)
+                    logging.warning(_('Runtime dependency resolving %s failed for package %s') % (dp, p.name))
+                    if item not in s:
+                        s.append(item)
+                        self.__deps_recurse(s, dp[-1].package)
         # TODO:: Получить исходник, пройти по всем бинарникам и проанализировать
         # зависимости всех остальных бинарных пакетов, собираемых в рамках текущего исходника
         # if pdest == PackageType.PACKAGE_BUILDED:
@@ -1101,20 +1134,10 @@ class RepoMaker(_RepoAnalyzer):
         dev_packages = sorted([p for p in set(dev_packages) - set(self._packages['target'])])
         for devpkg in dev_packages:
             logging.info(_('Processing %s ...') % devpkg)
-            deps = self._get_depends_for_package(devpkg)
+            deps = self._get_depends_for_package(devpkg, flags=DependencyFinder.FLAG_FINDER_DEV)
             unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
             if len(unresolve):
                 self._emit_unresolved(devpkg, unresolve)
-                for p in unresolve:
-                    pkg = p[1]
-                    if isinstance(pkg, str):
-                        depstr = pkg
-                    else:
-                        depstr = _('%s version %s') % (pkg.name, pkg.versions[0].version)
-                    logging.error(_('Could not resolve %s for %s: %s') %
-                                   ('dependency' if p[0] == devpkg else 'subdependency',
-                                    devpkg, depstr))
-                exit_with_error(_('Could not resolve dependencies'))
             builded = [d for d in deps if d[2] == PackageType.PACKAGE_BUILDED]
             files_to_copy = get_deb_dev_to_copy(builded)
             intersection = files_to_copy & target_builded_deps
