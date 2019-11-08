@@ -704,15 +704,11 @@ class Builder(BaseCommand):
             self.__make_clean()
         if rebuild_all:
             if len(rebuild):
-                logging.warning(_('Sources packages rebuilding %s ignored, because options --rebuild-all specified') %
+                logging.warning(_('Package rebuilding %s ignored, because options --rebuild-all specified') %
                                 (', '.join(rebuild)))
-            rebuild = []
-            for dscfilepath in glob.glob('%s/*.dsc' % self._conf.srcdirpath):
-                try:
-                    dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
-                    rebuild.append(dscfile['Source'])
-                except apt_pkg.Error as e:
-                    exit_with_error(e)
+            rebuild = [p.name for p in self.__scenario.packages]
+            logging.info(_('Will be rebuilded following packages: %s') %
+                         ', '.join(rebuild))
         self.__make_build(jobs, rebuild)
 
 
