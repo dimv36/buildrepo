@@ -703,6 +703,9 @@ class Builder(BaseCommand):
         if clean:
             self.__make_clean()
         if rebuild_all:
+            if len(rebuild):
+                logging.warning(_('Sources packages rebuilding %s ignored, because options --rebuild-all specified') %
+                                (', '.join(rebuild)))
             rebuild = []
             for dscfilepath in glob.glob('%s/*.dsc' % self._conf.srcdirpath):
                 try:
