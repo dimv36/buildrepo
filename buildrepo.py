@@ -534,8 +534,10 @@ class RepoInitializer(BaseCommand):
 class Builder(BaseCommand):
     cmd = 'build'
     args = (
-                ('--rebuild', {'required': False, 'action': 'append', 'default': [],
+                ('--rebuild', {'required': False, 'nargs': '+', 'default': [],
                                'help': _('Specify package(s) for force rebuilding')}),
+                ('--rebuild-all', {'required': False, 'action': 'store_true',
+                                   'default': False, 'help': _('Rebuild all packages in list')}),
                 ('--clean', {'required': False, 'action': 'store_true',
                              'default': False, 'help': _('Remove installed packages on time of repo initializing')}),
                 ('--jobs', {'required': False, 'type': int, 'default': 2, 'help': _('Jobs count for building')})
@@ -551,7 +553,6 @@ class Builder(BaseCommand):
             return '%s: %s %s' % (self.name, self.version)
 
     class Scenario:
-        __NAME_TAG = '# name:'
         __COMMENT_TAG = '#'
         __BUILD_OPTIONS_TAG = 'options='
         __BUILD_VERSION = 'version='
@@ -698,9 +699,17 @@ class Builder(BaseCommand):
                 # Обновляем кэш
                 cache.update()
 
-    def run(self, jobs, rebuild, clean):
+    def run(self, jobs, rebuild, rebuild_all, clean):
         if clean:
             self.__make_clean()
+        if rebuild_all:
+            rebuild = []
+            for dscfilepath in glob.glob('%s/*.dsc' % self._conf.srcdirpath):
+                try:
+                    dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
+                    rebuild.append(dscfile['Source'])
+                except apt_pkg.Error as e:
+                    exit_with_error(e)
         self.__make_build(jobs, rebuild)
 
 
@@ -718,7 +727,7 @@ class DependencyFinder:
     FLAG_FINDER_DEV = 1 << 1
 
     def __init__(self, package, caches, conf,
-                 exclude_rules=None, black_list=[], flags=DependencyFinder.FLAG_FINDER_MAIN):
+                 exclude_rules=None, black_list=[], flags=FLAG_FINDER_MAIN):
         self.deps = list()
         self.__caches = caches
         self.__package = cache.get(package)
@@ -910,11 +919,12 @@ class _RepoAnalyzer(BaseCommand):
             exit_with_error(_('Cache for OS dev repo is needed'))
         self.__caches = sorted(self._caches, key=lambda c: c[DIRECTIVE_CACHE_TYPE])
 
-    def _get_depends_for_package(self, package, exclude_rules=None, black_list=None):
+    def _get_depends_for_package(self, package, exclude_rules=None,
+                                 black_list=None, flags=DependencyFinder.FLAG_FINDER_MAIN):
         depfinder = DependencyFinder(package,
                                      self.__caches,
                                      self._conf,
-                                     exclude_rules, black_list)
+                                     exclude_rules, black_list, flags)
         return depfinder.deps
 
     def _emit_unresolved(self, current_package, unresolve, exit=True):
