@@ -207,7 +207,7 @@ class Debhelper:
                 pver_resolved = None
                 if len(version):
                     for pver in package_versions:
-                        if apt_pkg.check_dep(pver.source_version, op, version):
+                        if apt_pkg.check_dep(pver.version, op, version):
                             logging.debug(_('Package %s resolves expression %s %s') % (pver, op, version))
                             pver_resolved = pver
                             break
