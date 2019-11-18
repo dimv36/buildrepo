@@ -749,7 +749,6 @@ class DependencyFinder:
             logging.warning(_('Found {} versions of package {}: {}').format(
                 len(packages), pkgname, ', '.join(versions)))
 
-
     def __get_package_repository(self, package, required_by):
         package_name, package_ver = package.name, package.versions[0].version
         for cache in self.__caches:
@@ -1420,12 +1419,12 @@ def register_atexit_callbacks():
         for file in [os.path.join(root, f) for f in files]:
             shutil.chown(file, user, group)
 
-    def rm_tmp_dirs():
+    def remove_temp_directory_atexit_callback():
         for directory in tmpdirmanager.dirs():
             if os.path.exists(directory):
                 shutil.rmtree(directory)
 
-    def chown_atexit_callback():
+    def chown_files_atexit_callback():
         sudo_user = os.environ.get('SUDO_USER', None)
         sudo_gid = os.environ.get('SUDO_GID', None)
         if not sudo_user or not sudo_gid:
@@ -1438,7 +1437,8 @@ def register_atexit_callbacks():
             exit(0)
         conf = Configuration(args.config)
         for item in (os.path.join(conf.root, 'logs'),
-                     os.path.join(conf.root, 'repo')):
+                     os.path.join(conf.root, 'repo'),
+                     conf.cachedirpath):
             _chown_recurse(item, sudo_user, sudo_group)
         # Файлы логов
         for file in (os.path.join(conf.root, 'logs', conf.distro, 'chroot-{}.log'.format(conf.distro)),
@@ -1446,8 +1446,8 @@ def register_atexit_callbacks():
             shutil.chown(file, sudo_user, sudo_group)
 
     import atexit
-    atexit.register(rm_tmp_dirs)
-    atexit.register(chown_atexit_callback)
+    atexit.register(remove_temp_directory_atexit_callback)
+    atexit.register(chown_files_atexit_callback)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
