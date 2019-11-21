@@ -147,13 +147,13 @@ class Configuration:
         self.repoversion = self.parser.get('common', 'repo-version', fallback=None)
         self.chroot_helper = self.parser.get('chroot', 'chroot-helper', fallback=self.DEFAULT_CHROOT_SCRIPT)
         self.distro = self.parser.get('chroot', 'distro', fallback=None)
-        self.__base_init()
         if not self.reponame:
             exit_with_error(_('Repository name is missing in {}').format(conf_path))
         elif not self.repoversion:
             exit_with_error(_('Repository version is missing in {}').format(conf_path))
         elif not self.distro:
             exit_with_error(_('Distro name is missing in {}').format(conf_path))
+        self.__base_init()
 
     def __base_init(self):
         if self._inited:
@@ -1082,6 +1082,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
 
     def __init__(self, conf_path):
+        print(conf_path)
         super().__init__(conf_path)
         self.__no_create_iso = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'no-create-iso', fallback=False)
 
