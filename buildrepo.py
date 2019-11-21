@@ -18,19 +18,6 @@ import configparser
 import traceback
 
 CURDIR = os.path.abspath(os.path.curdir)
-DEVNULL = open(os.devnull, 'wb')
-
-DEB_RE = '^(?P<name>[\w\-\.\+]+)_(?P<version>[\w\.\-\~\+]+)_(?P<arch>[\w]+)\.deb$'
-DSC_FULL_RE = '^(?P<name>[\w\-\.\+]+)_(?P<version>[\w\.\-\~\+]+)\.dsc$'
-
-
-# Ключи кэша
-DIRECTIVE_CACHE_NAME = 'cache_name'
-DIRECTIVE_CACHE_TYPE = 'cache_type'
-DIRECTIVE_CACHE_VERSION = 'version'
-DIRECTIVE_CACHE_PACKAGES = 'packages'
-DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME = 'name'
-DIRECTIVE_CACHE_PACKAGES_PACKAGE_VERSION = 'version'
 
 # gettext
 _ = gettext.gettext
@@ -72,26 +59,11 @@ def make_iso(isopath, target, label, tmpdir, sources_iso=False):
     genisoimage_bin = shutil.which('genisoimage')
     if not genisoimage_bin:
         exit_with_error(_('Failed to find {} binary').format('genisoimage'))
-    if not run_command_log([genisoimage_bin, '--joliet-long', '-r','-J',
-                            '-o', isopath, '-V', '{}'.format(label), tmpdir]):
+    if not run_command_log([genisoimage_bin, '-r','-J', '--joliet-long',
+                            '--iso-level', '3', '-o', isopath,
+                            '-V', '{}'.format(label), tmpdir]):
         exit_with_error(_('Failed to create ISO image'))
     os.chdir(CURDIR)
-
-class Debhelper:
-    """
-    Класс для запуска Debian утилит
-    """
-
-    @staticmethod
-    def run_command_with_output(command):
-        return subprocess.check_output(command, shell=True, stderr=DEVNULL).decode().rstrip('\n')
-
-    @staticmethod
-    def run_command(command, need_output=False):
-        if not need_output:
-            subprocess.check_call(command, shell=True, stderr=DEVNULL, stdout=DEVNULL)
-        else:
-            subprocess.check_call(command, shell=True)
 
 
 class TemporaryDirManager:
@@ -1134,7 +1106,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         # все пакеты из сборочного репозитория за вычетом всех, указанных в target
         dev_packages = []
         for f in os.listdir(self._conf.repodirpath):
-            m = re.match(DEB_RE, f)
+            m = re.match(r'(?P<name>.*)_.*_.*.deb', f)
             if m:
                 package_name = m.group('name')
                 dev_packages.append(package_name)
