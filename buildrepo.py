@@ -955,19 +955,11 @@ class _RepoAnalyzerCmd(BaseCommand):
         if exit:
             exit_with_error(_('Could not resolve dependencies'))
 
-    def _cache_type_str(self, cache_type):
-        for c in self.__caches:
-            if c[DIRECTIVE_CACHE_TYPE] == cache_type:
-                return c[DIRECTIVE_CACHE_NAME]
-        return '<UNKNOWN>'
-
     def _emit_resolved_in_dev(self, current_package, deps_in_dev, exit=True):
         for p in deps_in_dev:
-            unused, pkg, cache_type = p
-            package_name, package_ver = pkg.name, pkg.versions[0].version
-            logging.error(_('%s %s (%s) for %s is founded in %s repo') %
-                           ('Dependency' if p[0] == current_package else 'Subdependency',
-                            package_name, package_ver, p[0], self._cache_type_str(cache_type)))
+            state, dependency, resolved, required_by = p
+            logging.error(_('Dependency {} for {} found in one of dev of ext-dev repo').format(
+                          dependency, required_by))
         if exit:
             exit_with_error(_('Could not resolve dependencies'))
 
