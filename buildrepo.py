@@ -11,7 +11,6 @@ import apt_pkg
 import shutil
 import argparse
 import subprocess
-import platform
 import atexit
 import time
 import datetime
@@ -46,19 +45,37 @@ def exit_with_error(error):
     exit(1)
 
 
-def fix_package_version(pver):
-    # TODO: Version hack
-    if ':' in pver:
-        pver = pver.split(':')[-1]
-    return pver
-
-
 def form_dependency(dep):
     depname, depver, depop = dep
     if len(depver):
         return '{} ({} {})'.format(depname, depop, depver)
     return depname
 
+
+def run_command_log(cmdargs):
+    proc = subprocess.Popen(cmdargs,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            universal_newlines=True)
+    out, unused = proc.communicate()
+    if proc.returncode:
+        logging.error(_('Command {} execution failed with code {}').format(' '.join(cmdargs),
+                                                                           proc.returncode))
+        logging.error(_('Out was: \n{}'.format(out)))
+    return proc.returncode == 0
+
+
+def make_iso(isopath, target, label, tmpdir, sources_iso=False):
+    os.chdir(os.path.join(tmpdir, '..'))
+    what = 'iso' if not sources_iso else 'sources iso'
+    logging.info(_('Building {} {} for {} ...').format(what, isopath, target))
+    genisoimage_bin = shutil.which('genisoimage')
+    if not genisoimage_bin:
+        exit_with_error(_('Failed to find {} binary').format('genisoimage'))
+    if not run_command_log([genisoimage_bin, '--joliet-long', '-r','-J',
+                            '-o', isopath, '-V', '{}'.format(label), tmpdir]):
+        exit_with_error(_('Failed to create ISO image'))
+    os.chdir(CURDIR)
 
 class Debhelper:
     """
@@ -75,23 +92,6 @@ class Debhelper:
             subprocess.check_call(command, shell=True, stderr=DEVNULL, stdout=DEVNULL)
         else:
             subprocess.check_call(command, shell=True)
-
-    @staticmethod
-    def get_sources_filelist(conf, package=None, dscfile=None):
-        dscfilepath = str()
-        if package:
-            candidate = package.versions[0]
-            package_name, package_ver = candidate.source_name, fix_package_version(candidate.source_version)
-            dscfilepath = '%s/%s_%s.dsc' % (conf.srcdirpath, package_name, package_ver)
-        else:
-            dscfilepath = os.path.join(conf.srcdirpath, dscfile)
-        try:
-            dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
-        except apt_pkg.Error as e:
-            exit_with_error(e)
-        filelist = [os.path.join(conf.srcdirpath, f) for f in dscfile.filelist]
-        filelist = [dscfilepath] + filelist
-        return tuple(item for item in filelist)
 
 
 class TemporaryDirManager:
@@ -998,91 +998,82 @@ class _RepoAnalyzerCmd(BaseCommand):
         logging.info(_('Summary: unresolved: {}, deps in dev: {}').format(len(all_unresolved), len(all_in_dev)))
 
 
+class DebianIsoRepository:
+    import platform
+
+    def __init__(self, conf, tmpdir, is_dev):
+        self.__conf = conf
+        self.__is_dev = is_dev
+        self.__tmpdir = os.path.join(tmpdir, '{}_{}_iso'.format(self.__conf.reponame,
+                                     'main' if not is_dev else 'dev'))
+        self.__name = self.__conf.reponame
+        if self.__is_dev:
+            self.__name = '{}-devel'.format(self.__name)
+        self.__codename = self.__conf.distro
+        self.__reprepro_bin = None
+        self.__arch = None
+        self.__base_init()
+
+    def __base_init(self):
+        conf_directory = os.path.join(self.__tmpdir, 'conf')
+        os.makedirs(conf_directory, exist_ok=True)
+        with open(os.path.join(conf_directory, 'distributions'), mode='w') as fp:
+            codename = '{}{}'.format(self.__conf.reponame,
+                                     '-devel' if self.__is_dev else '')
+            fp.write('Codename: {}\n'.format(codename))
+            fp.write('Version: {}\n'.format(self.__conf.repoversion))
+            fp.write('Description: {} repository\n'.format(self.__conf.reponame))
+            self.__arch = self.platform.machine()
+            if self.__arch == 'x86_64':
+                self.__arch = 'amd64'
+            fp.write('Architectures: {}\n'.format(self.__arch))
+            fp.writelines(['Components: main contrib non-free\n',
+                           'DebIndices: Packages Release . .gz .bz2\n',
+                           'Contents: . .gz .bz2\n'])
+        self.__reprepro_bin = shutil.which('reprepro')
+        if self.__reprepro_bin is None:
+            exit_with_error(_('Failed to find reprepro binary'))
+        os.chdir(self.__tmpdir)
+        if not run_command_log([self.__reprepro_bin, 'export']):
+            exit_with_error(_('Reprepro initialization failed'))
+        os.chdir(CURDIR)
+        disk_directory = os.path.join(self.__tmpdir, '.disk')
+        os.makedirs(disk_directory, exist_ok=True)
+        with open(os.path.join(disk_directory, 'info'), mode='w') as fp:
+            fp.write('{reponame} {version} ({distro}) - {arch} DVD\n'.format(reponame=self.__name,
+                                                                             version=self.__conf.repoversion,
+                                                                             distro=self.__conf.distro,
+                                                                             arch=self.__arch))
+
+    def create(self, packagesdir):
+        os.chdir(self.__tmpdir)
+        logging.info(_('Creating repository for {} via reprepro ...').format(self.__name))
+        for package in glob.glob('{}/*.deb'.format(packagesdir)):
+            if not run_command_log([self.__reprepro_bin, 'includedeb',
+                                    self.__name, package]):
+                exit_with_error(_('Including binaries to repo failure'))
+        # Удаление ненужных директорий
+        for directory in ['db', 'conf']:
+            shutil.rmtree(directory)
+        now = datetime.datetime.now().strftime('%Y-%m-%d')
+        isoname = '{repo}_{version}_{distro}_{date}.iso'.format(repo=self.__name,
+                                                                version=self.__conf.repoversion,
+                                                                distro=self.__conf.distro,
+                                                                date=now)
+        isopath = os.path.join(self.__conf.isodirpath, isoname)
+        label = '{repo} {version} ({distro}) {arch}'.format(repo=self.__name,
+                                                            version=self.__conf.repoversion,
+                                                            distro=self.__conf.distro,
+                                                            arch=self.__arch)
+        make_iso(isopath, self.__name, label, self.__tmpdir)
+
+
 class MakeRepoCmd(_RepoAnalyzerCmd):
     cmd = 'make-repo'
     required_binaries = ['reprepro', 'genisoimage']
-    args = (
-                ('--no-create-iso', {'required': False, 'help': _('Skip ISO creation')}),
-           )
-
-    class IsoRepositoryMaker:
-        def __init__(self, name, version, is_dev):
-            self.__directory = tmpdirmanager.create()
-            self.__name = name
-            self.__codename = self.get_codename()
-            self.__version = version
-            self.__is_dev = is_dev
-            self.__base_init()
-
-        def __get_arch(self):
-            if platform.machine() == 'x86_64':
-                return 'amd64'
-            exit_with_error('Unexpected machine: %s' % platform.machine())
-
-        @staticmethod
-        def get_codename():
-            release = Debhelper.run_command_with_output('lsb_release -c -s')
-            return release
-
-        def __base_init(self):
-            conf_directory = os.path.join(self.__directory, 'conf')
-            if not os.path.exists(conf_directory):
-                os.mkdir(conf_directory)
-            with open(os.path.join(conf_directory, 'distributions'), mode='w') as fp:
-                fp.write('Codename: %s\n' % self.__name)
-                fp.write('Version: %s\n' % self.__version)
-                fp.write('Description: %s repository\n' % self.__name)
-                fp.write('Architectures: %s\n' % self.__get_arch())
-                fp.writelines(['Components: main contrib non-free\n',
-                               'DebIndices: Packages Release . .gz .bz2\n',
-                               'Contents: . .gz .bz2\n'])
-            try:
-                os.chdir(self.__directory)
-                Debhelper.run_command('reprepro export')
-            except subprocess.CalledProcessError:
-                exit_with_error(_('Reprepro initialization failed'))
-            finally:
-                os.chdir(CURDIR)
-            disk_directory = os.path.join(self.__directory, '.disk')
-            if not os.path.exists(disk_directory):
-                os.mkdir(disk_directory)
-            with open(os.path.join(disk_directory, 'info'), mode='w') as fp:
-                fp.write('%s %s (%s) - %s DVD\n' % ('%s-devel' % self.__name
-                                                    if self.__is_dev else self.__name,
-                                                    self.__version,
-                                                    self.__codename,
-                                                    self.__get_arch()))
-
-        def mkiso(self, conf):
-            try:
-                os.chdir(self.__directory)
-                logging.info(_('Creating repository for %s via reprepro ...') % (
-                             '%s-dev' % self.__name if self.__is_dev else self.__name))
-                packagedir = conf.frepodevdirpath if self.__is_dev else conf.frepodirpath
-                Debhelper.run_command('reprepro includedeb %s %s/*.deb' % (self.__name, packagedir))
-                # Удаление ненужных директорий
-                for directory in ['db', 'conf']:
-                    shutil.rmtree(directory)
-                now = datetime.datetime.now().strftime('%Y-%m-%d')
-                isoname = '%s_%s_%s_%s.iso' % (self.__name, self.__version, self.__codename, now)
-                if self.__is_dev:
-                    isoname = 'devel-%s' % isoname
-                isopath = os.path.join(conf.isodirpath, isoname)
-                label = '%s %s (%s) %s' % (self.__name, self.__version, self.__codename, self.__get_arch())
-                os.chdir(os.path.join(self.__directory, '..'))
-                logging.info(_('Building iso %s for %s ...') % (isopath, self.__name))
-                Debhelper.run_command('genisoimage --joliet-long -r -J -o %s -V "%s" %s' % (isopath,
-                                                                                            label,
-                                                                                            self.__directory))
-            except Exception as e:
-                exit_with_error(_('Failed to make iso: %s') % e)
-            finally:
-                os.chdir(CURDIR)
-
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
 
     def __init__(self, conf_path):
-        print(conf_path)
         super().__init__(conf_path)
         self.__no_create_iso = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'no-create-iso', fallback=False)
 
@@ -1097,17 +1088,9 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             exit_with_error(_('Failed to find sources via regexp {}').format(glob_re))
         dscfilepath = dscfilepath[0]
         dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
-        return dscfile.filelist + [os.path.basename(dscfilepath)]
+        return tuple(dscfile.filelist + [os.path.basename(dscfilepath)])
 
-    def run(self, no_create_iso):
-        def get_deb_dev_to_copy(pkgs):
-            filenames = set()
-            for pkg in pkgs:
-                p = pkg[1]
-                if self._conf.repodirpath in p.versions[0].uris[0]:
-                    filenames.add(p.versions[0].filename)
-            return filenames
-
+    def run(self):
         logging.info(_('Processing target repository ...'))
         # Анализ пакетов основного репозитория
         target_builded_deps = set()
@@ -1115,7 +1098,8 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         tmpdirpath = tmpdirmanager.create()
         frepodirpath = os.path.join(tmpdirpath, '{}_main'.format(self._conf.reponame))
         frepodevdirpath = os.path.join(tmpdirpath, '{}_dev'.format(self._conf.reponame))
-        for subdir in (frepodirpath, frepodevdirpath):
+        fsrcdirpath = os.path.join(tmpdirpath, '{}_src'.format(self._conf.reponame))
+        for subdir in (frepodirpath, frepodevdirpath, fsrcdirpath):
             os.makedirs(subdir, exist_ok=True)
         for required in self._packages['target']:
             logging.info(_('Processing {} ...').format(required))
@@ -1210,45 +1194,44 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             packages = list(set(packages))
             logging.info(_('Copying sources for package(s) {} ...').format(', '.join(packages)))
             for source in sourcelist:
-                dst = os.path.join(self._conf.fsrcdirpath, os.path.basename(source))
+                src = os.path.join(self._conf.srcdirpath, source)
+                dst = os.path.join(fsrcdirpath, os.path.basename(source))
                 try:
-                    logging.debug(_('Copying {} to {}').format(source, dst))
-                    shutil.copyfile(source, dst)
+                    logging.debug(_('Copying {} to {}').format(src, dst))
+                    shutil.copyfile(src, dst)
                 except Exception as e:
                     exit_with_error(e)
-        if no_create_iso:
-            return
-        # Создаем репозиторий (main и dev)
-        for is_dev in (False, True):
-            iso_maker = self.IsoRepositoryMaker(self._conf.reponame, self._conf.repoversion, is_dev)
-            iso_maker.mkiso(self._conf)
+        # Создаем образа дисков с репозиториями (main и dev)
+        for items in ((frepodirpath, False),
+                      (frepodevdirpath, True)):
+            pkgpath, is_dev = items
+            iso_maker = DebianIsoRepository(self._conf, tmpdirpath, is_dev)
+            iso_maker.create(pkgpath)
         # Формируем образ диска с исходниками
-        tmpdir = tmpdirmanager.create()
-        try:
-            # Копируем исходники
-            shutil.copytree(self._conf.fsrcdirpath, os.path.join(tmpdir, 'src'))
-            # Копируем списки и текущий скрипт
-            script_dir = os.path.dirname(sys.argv[0])
-            for file in os.listdir(script_dir):
-                if os.path.isfile(file):
-                    shutil.copyfile(os.path.join(script_dir, file),
-                                    os.path.join(tmpdir, file))
-            os.chdir(os.path.join(tmpdir, '..'))
-            now = datetime.datetime.now().strftime('%Y-%m-%d')
-            isoname = 'sources-{}_{}_{}_{}.iso'.format(self._conf.reponame,
-                                                       self._conf.repoversion,
-                                                       self.IsoRepositoryMaker.get_codename(),
-                                                       now)
-            isopath = os.path.join(self._conf.isodirpath, isoname)
-            label = '{} {} (sources)'.format(self._conf.reponame, self._conf.repoversion)
-            logging.info(_('Building sources iso {} for {} ...').format(isopath, self._conf.reponame))
-            Debhelper.run_command('genisoimage --joliet-long -r -J -o {} -V "{}" {}' % (isopath,
-                                                                                        label,
-                                                                                        tmpdir))
-        except Exception as e:
-            exit_with_error(_('Failed to create source iso: {}').format(e))
-        finally:
-            os.chdir(CURDIR)
+        # Создаем каталог для образа диска с исходниками
+        sources_iso_tmpdir = os.path.join(tmpdirpath, '{}_src_iso'.format(self._conf.reponame))
+        os.makedirs(sources_iso_tmpdir, exist_ok=True)
+        # Копируем исходники
+        shutil.copytree(fsrcdirpath, os.path.join(sources_iso_tmpdir, 'src'))
+        # Копируем файлы для сборки дистрибутива
+        required_files = [os.path.abspath(sys.argv[0]),
+                          os.path.abspath(self._conf.chroot_helper),
+                          os.path.abspath(self._conf.parser.get(BuildCmd.cmd, 'source-list')),
+                          os.path.abspath(self._conf.parser.get(MakeRepoCmd.alias, 'white-list'))]
+        chroot_script = self._conf.parser.get('chroot', 'chroot-script', fallback=None)
+        if chroot_script:
+            required_files.append(os.path.abspath(chroot_script))
+        # TODO: Поддержка дополнительных файлов
+        for req in required_files:
+            shutil.copyfile(req, os.path.join(sources_iso_tmpdir, os.path.basename(req)))
+        now = datetime.datetime.now().strftime('%Y-%m-%d')
+        isoname = 'sources-{}_{}_{}_{}.iso'.format(self._conf.reponame,
+                                                    self._conf.repoversion,
+                                                    self._conf.distro,
+                                                    now)
+        isopath = os.path.join(self._conf.isodirpath, isoname)
+        label = '{} {} (sources)'.format(self._conf.reponame, self._conf.repoversion)
+        make_iso(isopath, self._conf.reponame, label, sources_iso_tmpdir, sources_iso=True)
 
 
 class RepositoryFullCache:
