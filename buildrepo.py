@@ -955,7 +955,7 @@ class _RepoAnalyzerCmd(BaseCommand):
         if exit:
             exit_with_error(_('Could not resolve dependencies'))
 
-    def _emit_resolved_in_dev(self, current_package, deps_in_dev, exit=True):
+    def _emit_resolved_in_dev(self, deps_in_dev, exit=True):
         for p in deps_in_dev:
             state, dependency, resolved, required_by = p
             logging.error(_('Dependency {} for {} found in one of dev of ext-dev repo').format(
