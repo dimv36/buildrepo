@@ -50,7 +50,6 @@ then
 fi
 
 IN_CHROOT=`echo $container`
-echo "IN_CHROOT '$IN_CHROOT'"
 if [[ "x$IN_CHROOT" == "x" ]]
 then
 	echo "$0 must be run under chroot"

@@ -1,22 +1,16 @@
 #!/usr/bin/python3
 
+import os
 import sys
 import logging
 import re
-import json
 import gettext
-import os
-import gzip
-import apt
 import apt.debfile
 import glob
 import apt_pkg
-import pwd
 import shutil
-import tarfile
 import argparse
 import subprocess
-import tempfile
 import platform
 import atexit
 import time
@@ -42,6 +36,10 @@ DIRECTIVE_CACHE_PACKAGES_PACKAGE_VERSION = 'version'
 # gettext
 _ = gettext.gettext
 
+# Disable warnings
+import warnings
+warnings.filterwarnings('ignore')
+
 
 def exit_with_error(error):
     logging.critical(error)
@@ -53,6 +51,13 @@ def fix_package_version(pver):
     if ':' in pver:
         pver = pver.split(':')[-1]
     return pver
+
+
+def form_dependency(dep):
+    depname, depver, depop = dep
+    if len(depver):
+        return '{} ({} {})'.format(depname, depop, depver)
+    return depname
 
 
 class Debhelper:
@@ -70,17 +75,6 @@ class Debhelper:
             subprocess.check_call(command, shell=True, stderr=DEVNULL, stdout=DEVNULL)
         else:
             subprocess.check_call(command, shell=True)
-
-    @staticmethod
-    def find_packages_files(mount_point, package_file='Packages.gz'):
-        if not os.path.exists(mount_point):
-            exit_with_error(_('Path %s does not exists') % mount_point)
-        distrs_path = os.path.join(mount_point, 'dists')
-        result = []
-        for root, dirs, files in os.walk(distrs_path):
-            if package_file in files:
-                result.append(os.path.join(root, package_file))
-        return result
 
     @staticmethod
     def get_sources_filelist(conf, package=None, dscfile=None):
@@ -101,6 +95,7 @@ class Debhelper:
 
 
 class TemporaryDirManager:
+    import tempfile
     _instance = None
 
     def __new__(cls, *args, **kwargs):
@@ -120,7 +115,7 @@ class TemporaryDirManager:
         return self.__dirs
 
     def create(self):
-        directory = tempfile.mkdtemp(prefix=self.__prefix, dir=self.__basedir)
+        directory = self.tempfile.mkdtemp(prefix=self.__prefix, dir=self.__basedir)
         os.makedirs(directory, exist_ok=True)
         self.__dirs.append(directory)
         return directory
@@ -296,6 +291,7 @@ class NSPContainer:
         logstream.write('Executing {} ...\n'.format(' '.join(cmdargs)))
         logstream.flush()
         start = datetime.datetime.now()
+        # TODO: Отключить цвета в логе
         proc = subprocess.Popen(cmdargs, stdout=logstream, stderr=logstream,
                                 universal_newlines=True)
         proc.communicate()
@@ -310,7 +306,9 @@ class NSPContainer:
         if not nspawn_bin:
             exit_with_error(_('systemd-nspawn does not found'))
         nspawn_args = [nspawn_bin, '-D', container_path,
-                       '--hostname', self.__name]
+                       '--hostname', self.__name,
+                       '-E', 'TERM=vt220',
+                       '-E', 'LC_ALL=C']
         for src, dstinfo in self.bind_directories.items():
             dst, mode = dstinfo
             if mode == 'ro':
@@ -366,8 +364,8 @@ class NSPContainer:
         logging.info(_('Deploying {} to {} ...').format(self.__name, self.deploypath))
         try:
             os.chdir(self.__conf.chrootsinstdirpath)
-            with tarfile.open(self.chroot_path,
-                              mode='r:{}'.format(self.CHROOT_COMPRESSION)) as tf:
+            with self.tarfile.open(self.chroot_path,
+                                   mode='r:{}'.format(self.CHROOT_COMPRESSION)) as tf:
                 tf.extractall()
             shutil.move(self.__name,
                         self.hostname)
@@ -456,6 +454,7 @@ class NSPContainer:
                 apt_conf.write('APT::Get::Install-Suggests "false";\n')
                 apt_conf.write('APT::Get::Assume-Yes "true";\n')
                 apt_conf.write('Acquire::AllowInsecureRepositories "true";\n')
+                apt_conf.write('APT::Get::AllowUnauthenticated "true";\n')
             # Настраиваем /etc/hosts
             chroot_etc_hosts = os.path.join(dist_chroot_dir, 'etc', 'hosts')
             with open(chroot_etc_hosts, mode='w') as host_conf:
@@ -502,8 +501,8 @@ class NSPContainer:
             os.chdir(tmpdir)
             compressed_tar_path = os.path.join(tmpdir, '{}.tar.{}'.format(self.__name, self.CHROOT_COMPRESSION))
             logging.info(_('Creating archive with chroot {} ...').format(self.__name))
-            with tarfile.open(compressed_tar_path,
-                              mode='w:{}'.format(self.CHROOT_COMPRESSION)) as tf:
+            with self.tarfile.open(compressed_tar_path,
+                                   mode='w:{}'.format(self.CHROOT_COMPRESSION)) as tf:
                 tf.add(self.__name, filter=chroot_exclude_filter)
             # Move to chroot storage
             dst = os.path.join(self.__conf.chrootsdirpath, '{}.tar.{}'.format(self.__name, self.CHROOT_COMPRESSION))
@@ -552,20 +551,24 @@ class RepoInitializer(BaseCommand):
         """
         Создает директории в корневой директории
         """
-        def make_dir(directory):
+        for directory in [self._conf.srcdirpath,
+                          self._conf.repodirpath,
+                          self._conf.logsdirpath,
+                          self._conf.cachedirpath]:
             if os.path.exists(directory):
                 shutil.rmtree(directory)
+            logging.debug(_('Creating directory {} ...').format(directory))
             os.makedirs(directory, exist_ok=True)
-            logging.debug(_('Creating directory {}').format(directory))
-
-        for _directory in [self._conf.srcdirpath, self._conf.chrootsdirpath,
-                           self._conf.chrootsinstdirpath, self._conf.tmpdirpath,
-                           self._conf.repodirpath, self._conf.logsdirpath,
-                           self._conf.cachedirpath, self._conf.isodirpath]:
-            make_dir(_directory)
+        for directory in [self._conf.chrootsdirpath,
+                          self._conf.chrootsinstdirpath,
+                          self._conf.tmpdirpath,
+                          self._conf.isodirpath]:
+            logging.debug(_('Creating directory {} ...').format(directory))
+            os.makedirs(directory, exist_ok=True)
         # Создаем пустой файл Packages в каталоге репозитория
         with open(os.path.join(self._conf.repodirpath, 'Packages'), mode='w') as fp:
             pass
+        logging.info(_('Succefully inited'))
 
 
 class BuildCmd(BaseCommand):
@@ -721,44 +724,122 @@ class PackageType:
      PACKAGE_FROM_EXT_DEV_REPO,
      PACKAGE_NOT_FOUND) = range(0, 6)
 
+    @classmethod
+    def available_types(cls):
+        for obj in filter(lambda x: x.startswith('PACKAGE') , dir(cls)):
+            yield getattr(cls, obj)
 
 class DependencyFinder:
     FLAG_FINDER_MAIN = 1 << 0
     FLAG_FINDER_DEV = 1 << 1
 
-    def __init__(self, package, caches, conf,
+    def __init__(self, pkgname, rfcache, conf,
                  exclude_rules=None, black_list=[], flags=FLAG_FINDER_MAIN):
-        self.deps = list()
-        self.__caches = caches
+        self.__deps = []
+        self.__rfcache = rfcache
         self.__exclude_rules = exclude_rules
         self.__black_list = black_list
         self.__conf = conf
         self.__flags = flags
-        self.__package = self.__package_from_apt_cache(package)
-        self.deps.append((self.__package.name, self.__package,
-                          self.__get_package_repository(self.__package, self.__package.name)))
-        self.__deps_recurse(self.deps, self.__package)
+        self.__seendeps = []
+        pkg_deps_info = self.__find_dep(pkgname)
+        self.__recurse_deps(self.__deps, pkg_deps_info)
 
-    def __package_from_apt_cache(self, pkgname):
+    @property
+    def deps(self):
+        return self.__deps
+
+    def __recurse_deps(self, s, p):
+        required_by = form_dependency(p)
+        *unused, deps = self.__rfcache.find_dependencies(p, required_by)
+        for dep in deps:
+            if len(dep) == 1:
+                dep = tuple(dep[0])
+                seen_item = (dep, required_by,)
+                if seen_item in self.__seendeps:
+                    continue
+                depdest, pdstinfo, resolved, unused = self.__rfcache.find_dependencies(*seen_item)
+                self.__seendeps.append(seen_item)
+                if depdest == PackageType.PACKAGE_NOT_FOUND:
+                    i = (depdest, pdstinfo, resolved, required_by)
+                    assert (len(i) == 4), (item, len(i))
+                    if i not in s:
+                        s.append(i)
+                else:
+                    item = (depdest, pdstinfo, resolved, required_by)
+                    if item not in s:
+                        assert (len(item) == 4), (item, len(item))
+                        s.append(item)
+                        self.__recurse_deps(s, dep)
+            else:
+                # Альтернативная зависимость
+                item = None
+                resolved = None
+                for dpitem in dep:
+                    dpitem = tuple(dpitem)
+                    seen_item = (dpitem, required_by,)
+                    if seen_item in self.__seendeps:
+                        continue
+                    depdest, pdstinfo, resolved, unused = self.__rfcache.find_dependencies(*seen_item)
+                    if depdest == PackageType.PACKAGE_NOT_FOUND:
+                        i = (depdest, pdstinfo, resolved, required_by)
+                        assert (len(i) == 4), (item, len(i))
+                        if i not in s:
+                            s.append(i)
+                    else:
+                        item = (depdest, pdstinfo, resolved, required_by)
+                        if item not in s:
+                            assert (len(item) == 4), (item, len(item))
+                            s.append(item)
+                            self.__recurse_deps(s, dpitem)
+                        break
+                if self.__flags & DependencyFinder.FLAG_FINDER_MAIN and not item:
+                    alt_dep_full = ' | '.join(form_dependency(d) for d in dep)
+                    # Мы не смогли удовлетворить альтеранитивные зависимости. Добавляем последнюю
+                    last_alt_dep = dep[-1]
+                    item = (depdest, last_alt_dep, resolved, required_by)
+                    logging.warning(_('Runtime dependency resolving {} failed for {}').format(
+                        alt_dep_full, form_dependency(p)))
+                    if item not in s:
+                        assert (len(item) == 4), (item, len(item))
+                        s.append(item)
+                        self.__recurse_deps(s, last_alt_dep)
+
+    def __find_dep(self, pkgname):
+        def sortversions(versions):
+            for i in range(1, len(versions)):
+                item_to_insert = versions[i]
+                j = i - 1
+                while j >= 0 and apt_pkg.check_dep(versions[j], '<', item_to_insert):
+                    versions[j + 1] = versions[j]
+                    j -= 1
+                versions[j + 1] = item_to_insert
+            return versions
+
         pkg_glob_re = os.path.join(self.__conf.repodirpath, '{}_*.deb'.format(pkgname))
         packages = glob.glob(pkg_glob_re)
+        versions = [re.match(r'.*_(?P<version>.*)_.*\.deb', p).group('version') for p in packages]
         if not len(packages):
             exit_with_error(_('Failed find package {} in repo').format(pkgname))
         elif len(packages) > 1:
-            versions = [re.match(r'.*_(?P<version>.*)_.*\.deb', p).group('version') for p in packages]
+            versions = sortversions(versions)
             logging.warning(_('Found {} versions of package {}: {}').format(
                 len(packages), pkgname, ', '.join(versions)))
-
-    def __get_package_repository(self, package, required_by):
-        package_name, package_ver = package.name, package.versions[0].version
-        for cache in self.__caches:
-            cache_name = cache[DIRECTIVE_CACHE_NAME]
-            for p in cache[DIRECTIVE_CACHE_PACKAGES]:
-                if p['name'] == package_name and p['version'] == package_ver:
-                    logging.debug(_('{} -> {}({}) found in {} repo').format(
-                        required_by, package_name, package_ver, cache_name))
-                    return cache[DIRECTIVE_CACHE_TYPE]
-        return PackageType.PACKAGE_NOT_FOUND
+            version = versions[0]
+            logging.warning(_('Will be processed {} = {}').format(pkgname, version))
+            pkg_glob_re = os.path.join(self.__conf.repodirpath, '{}_{}_*.deb'.format(pkgname, version))
+        else:
+            version = versions[0]
+        pkgpath = packages[0]
+        deb_package = apt.debfile.DebPackage(filename=pkgpath)
+        # Нашли зависимости?
+        pkg = (pkgname, version, '=')
+        depitem = (PackageType.PACKAGE_BUILDED,         # Где есть зависимость
+                   pkg,                                 # Информация для анализа
+                   (pkgname, version),                  # Как разрешается
+                   form_dependency(pkg))                # Строка зависимости
+        self.__deps.append(depitem)
+        return pkg
 
     def __process_exclude_filters(self, s, p):
         if self.__exclude_rules is not None:
@@ -792,59 +873,6 @@ class DependencyFinder:
             except apt_pkg.Error as e:
                 exit_with_error(e)
 
-    # TODO: Создать отдельный объект для кэша
-    def _cache_type_str(self, cache_type):
-        for c in self.__caches:
-            if c[DIRECTIVE_CACHE_TYPE] == cache_type:
-                return c[DIRECTIVE_CACHE_NAME]
-        return '<UNKNOWN>'
-
-    def __deps_recurse(self, s, p):
-        deps = p.candidate.get_dependencies('Depends')
-        pre_deps = p.candidate.get_dependencies('PreDepends')
-        all_deps = deps + pre_deps
-        pdest = None
-        for i in all_deps:
-            dp = i.target_versions
-            if not len(dp):
-                # Пакета нет в кэше
-                depname = str(i).split(':')[1].strip()
-                pdest = PackageType.PACKAGE_NOT_FOUND
-                s.append((p.name, depname, PackageType.PACKAGE_NOT_FOUND,))
-            elif len(dp) == 1:
-                # Обычная зависимость?
-                package = dp[0].package
-                pdest = self.__get_package_repository(package, p.name)
-                item = (p.name, package, pdest)
-                if item not in s:
-                    s.append(item)
-                    self.__deps_recurse(s, package)
-            elif len(dp) > 1:
-                # Альтернативная зависимость
-                item = None
-                for dpitem in dp:
-                    pdest = self.__get_package_repository(dpitem.package, p.name)
-                    logging.debug(_('Alternative dependency {} for {} is found in {} repo').format(
-                        dpitem.package.name, p.name, self._cache_type_str(pdest)))
-                    if pdest in (PackageType.PACKAGE_BUILDED, PackageType.PACKAGE_FROM_OS_REPO):
-                        item = (p.name, dpitem.package, pdest)
-                        if item not in s:
-                            s.append(item)
-                            self.__deps_recurse(s, dpitem.package)
-                        break
-                if self.__flags & DependencyFinder.FLAG_FINDER_MAIN and not item:
-                    # Мы не смогли удовлетворить альтеранитивные зависимости. Добавляем последнюю
-                    item = (p.name, dp[-1].package, pdest)
-                    logging.warning(_('Runtime dependency resolving {} failed for package {}').format(
-                        dp, p.name))
-                    if item not in s:
-                        s.append(item)
-                        self.__deps_recurse(s, dp[-1].package)
-        # TODO:: Получить исходник, пройти по всем бинарникам и проанализировать
-        # зависимости всех остальных бинарных пакетов, собираемых в рамках текущего исходника
-        # if pdest == PackageType.PACKAGE_BUILDED:
-        #     self.__process_exclude_filters(s, p)
-
 
 class _RepoAnalyzerCmd(BaseCommand):
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
@@ -866,8 +894,10 @@ class _RepoAnalyzerCmd(BaseCommand):
             ', '.join(self._dev_packages_suffixes)))
         self._packages = {}
         self._caches = []
+        self._rfcache = RepositoryFullCache(self._conf)
         self.__build_cache_of_builded_packages()
-        self.__load_caches()
+        self._rfcache.load()
+        self._builded_cache = self._rfcache.builded_cache
         self.__parse_white_list()
 
     def __parse_white_list(self):
@@ -887,7 +917,7 @@ class _RepoAnalyzerCmd(BaseCommand):
                                       'but section expected').format(i))
                 packages = self._packages.get(last_section)
                 if line in packages:
-                    logging.warn(_('Package %s already in %s, skipped'), line, last_section)
+                    logging.warning(_('Package {} already in {}, skipped').format(line, last_section))
                     continue
                 packages.append(line)
                 self._packages[last_section] = packages
@@ -910,41 +940,18 @@ class _RepoAnalyzerCmd(BaseCommand):
                   ctype=PackageType.PACKAGE_BUILDED,
                   info_message=False)
 
-    def __load_caches(self):
-        files = [f for f in os.listdir(self._conf.cachedirpath) if f.endswith('.cache')]
-        if len(files) <= 1:
-            exit_with_error(_('No one cache is created'))
-        for f in files:
-            path = os.path.join(self._conf.cachedirpath, f)
-            with open(path, mode='r') as json_data:
-                self._caches.append(json.load(json_data))
-        os_repo_exists = any([cache[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_FROM_OS_REPO
-                             for cache in self._caches])
-        if not os_repo_exists:
-            exit_with_error(_('Cache for OS repo is needed'))
-        os_dev_repo_exists = any([cache[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_FROM_OS_DEV_REPO
-                                 for cache in self._caches])
-        if not os_dev_repo_exists:
-            exit_with_error(_('Cache for OS dev repo is needed'))
-        self.__caches = sorted(self._caches, key=lambda c: c[DIRECTIVE_CACHE_TYPE])
-
     def _get_depends_for_package(self, package, exclude_rules=None,
                                  black_list=None, flags=DependencyFinder.FLAG_FINDER_MAIN):
         depfinder = DependencyFinder(package,
-                                     self.__caches,
+                                     self._rfcache,
                                      self._conf,
                                      exclude_rules, black_list, flags)
         return depfinder.deps
 
-    def _emit_unresolved(self, current_package, unresolve, exit=True):
+    def _emit_unresolved(self, unresolve, exit=True):
         for p in unresolve:
-            binary, dependency, unused = p
-            depname = str()
-            if isinstance(dependency, apt.package.Package):
-                depname = dependency.name
-            elif isinstance(dependency, str):
-                depname = dependency
-            logging.error(_('%s depends on %s') % (binary, depname))
+            state, dependency, resolved, required_by = p
+            logging.error(_('Could not resolve dependency {} for {}'.format(dependency, required_by)))
         if exit:
             exit_with_error(_('Could not resolve dependencies'))
 
@@ -968,31 +975,27 @@ class _RepoAnalyzerCmd(BaseCommand):
         def sort_deps(deps):
             res = {}
             for dep_info in deps:
-                req, dependency, unused = dep_info
-                req_values = res.get(req, [])
-                depname = str()
-                if isinstance(dependency, apt.package.Package):
-                    depname = dependency.name
-                elif isinstance(dependency, str):
-                    depname = dependency
-                req_values.append(depname)
-                req_values = list(set(req_values))
-                res[req] = req_values
+                unused, dependency, unused2, required_by = dep_info
+                req_values = res.get(required_by, [])
+                req_values.append(dependency)
+                req_values = sorted(list(set(req_values)))
+                res[required_by] = req_values
             return res
 
         def print_items(deps):
             for dep, requirements in deps.items():
-                print(_('Package %s:') % dep)
+                print(_('Package {}:').format(dep))
                 for req in requirements:
-                    print('\t%s' % req)
+                    print('\t{}'.format(req))
 
         unresolved_hash = sort_deps(all_unresolved)
         print(_('***** Unresolved ***** :'))
         print_items(unresolved_hash)
         in_dev_hash = sort_deps(all_in_dev)
+        print()
         print(_('***** Found in dev: *****'))
         print_items(in_dev_hash)
-        logging.info(_('Summary: unresolved: %d, deps in dev: %d') % (len(all_unresolved), len(all_in_dev)))
+        logging.info(_('Summary: unresolved: {}, deps in dev: {}').format(len(all_unresolved), len(all_in_dev)))
 
 
 class MakeRepoCmd(_RepoAnalyzerCmd):
@@ -1082,6 +1085,19 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         super().__init__(conf_path)
         self.__no_create_iso = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'no-create-iso', fallback=False)
 
+    def __sources(self, pkg, version):
+        # Определяем исходники по имени бинарного пакета и вресии
+        source = self._builded_cache.source_package(pkg, version)
+        if source is None:
+            exit_with_error(_('Failed finding sources for {}_{}').format(pkg, version))
+        glob_re = os.path.join(self._conf.srcdirpath, '{}_{}*.dsc'.format(source, version))
+        dscfilepath = glob.glob(glob_re)
+        if not len(dscfilepath):
+            exit_with_error(_('Failed to find sources via regexp {}').format(glob_re))
+        dscfilepath = dscfilepath[0]
+        dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
+        return dscfile.filelist + [os.path.basename(dscfilepath)]
+
     def run(self, no_create_iso):
         def get_deb_dev_to_copy(pkgs):
             filenames = set()
@@ -1095,44 +1111,45 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         # Анализ пакетов основного репозитория
         target_builded_deps = set()
         sources = dict()
+        tmpdirpath = tmpdirmanager.create()
+        frepodirpath = os.path.join(tmpdirpath, '{}_main'.format(self._conf.reponame))
+        frepodevdirpath = os.path.join(tmpdirpath, '{}_dev'.format(self._conf.reponame))
+        for subdir in (frepodirpath, frepodevdirpath):
+            os.makedirs(subdir, exist_ok=True)
         for required in self._packages['target']:
             logging.info(_('Processing {} ...').format(required))
             deps = self._get_depends_for_package(required,
                                                  exclude_rules=self._dev_packages_suffixes,
                                                  black_list=self._packages.get('target-dev', []))
-            unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
-            deps_in_dev = [d for d in deps if d[2] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
+            unresolve = [d for d in deps if d[0] == PackageType.PACKAGE_NOT_FOUND]
+            deps_in_dev = [d for d in deps if d[0] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
                                                        PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
             if len(unresolve):
-                self._emit_unresolved(required, unresolve)
+                self._emit_unresolved(unresolve)
             if len(deps_in_dev):
-                self._emit_resolved_in_dev(required, deps_in_dev)
-            target_deps = [d for d in deps if d[2] == PackageType.PACKAGE_BUILDED]
-            for p in target_deps:
-                package = p[1]
-                if package.name in sources.keys():
-                    continue
-                package_sources = Debhelper.get_sources_filelist(self._conf, package=package)
-                sources[package.name] = package_sources
+                self._emit_resolved_in_dev(deps_in_dev)
+            target_deps = [d for d in deps if d[0] == PackageType.PACKAGE_BUILDED]
             files_to_copy = set()
-            # Hack:
-            # Поскольку в собираемом репозитории может быть пакет с той же версией,
-            # что и в DEV репозиториии ОС, то нам требуется определить путь к пакету
-            # из собираемого репозитория.
-            for item in target_deps:
-                p = item[1]
-                for version in p.versions:
-                    if self._conf.repodirpath in version.uri:
-                        files_to_copy.add(version.filename)
-                        break
+            for p in target_deps:
+                resolved = p[2]
+                source_key = '{}_{}'.format(*resolved)
+                if source_key in sources.keys():
+                    continue
+                sources[source_key] = self.__sources(*resolved)
+                # Определяем бинарные пакеты для копирования
+                glob_copy_re = os.path.join(self._conf.repodirpath, '{}_{}*.deb'.format(*resolved))
+                binaries = glob.glob(glob_copy_re)
+                if not len(binaries):
+                    exit_with_error(_('Failed to find binaries by glob re: {}').format(glob_copy_re))
+                assert (len(binaries) == 1)
+                files_to_copy.add(binaries[0])
             target_builded_deps.update(files_to_copy)
             logging.debug(_('Copying dependencies for package {}: {}').format(required, files_to_copy))
             for f in files_to_copy:
-                src = os.path.join(self._conf.root, f)
-                dst = os.path.join(self._conf.frepodirpath, os.path.basename(f))
+                dst = os.path.join(frepodirpath, os.path.basename(f))
                 try:
-                    logging.debug(_('Copying {} to {}').format(src, dst))
-                    shutil.copyfile(src, dst)
+                    logging.debug(_('Copying {} to {}').format(f, dst))
+                    shutil.copyfile(f, dst)
                 except Exception as e:
                     exit_with_error(e)
         logging.info(_('Processing dev repository ...'))
@@ -1148,27 +1165,37 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         for devpkg in dev_packages:
             logging.info(_('Processing {} ...').format(devpkg))
             deps = self._get_depends_for_package(devpkg, flags=DependencyFinder.FLAG_FINDER_DEV)
-            unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
+            unresolve = [d for d in deps if d[0] == PackageType.PACKAGE_NOT_FOUND]
             if len(unresolve):
-                self._emit_unresolved(devpkg, unresolve)
-            builded = [d for d in deps if d[2] == PackageType.PACKAGE_BUILDED]
-            files_to_copy = get_deb_dev_to_copy(builded)
-            intersection = files_to_copy & target_builded_deps
-            # Исключаем пересечения с основным репозиторием
-            files_to_copy -= intersection
-            for package in [p[1] for p in builded]:
-                if package.name in sources.keys():
+                self._emit_unresolved(unresolve)
+            builded = [d[2] for d in deps if d[0] == PackageType.PACKAGE_BUILDED]
+            # Определяем файлы для копирования на второй диск
+            files_to_copy = set()
+            for resolved in builded:
+                glob_file_re = os.path.join(self._conf.repodirpath, '{}_{}*.deb'.format(*resolved))
+                binaries = glob.glob(glob_file_re)
+                if not len(binaries):
+                    exit_with_error(_('Failed to find binaries by glob re: {}').format(glob_copy_re))
+                assert (len(binaries) == 1)
+                # Исключаем бинарники, которые уже есть в основном репозитории
+                binary = binaries[0]
+                if os.path.basename(binary) in os.listdir(frepodirpath):
                     continue
-                package_sources = Debhelper.get_sources_filelist(self._conf, package)
-                sources[package.name] = package_sources
+                # В противном случае добавляем их в список файлов для копирования
+                files_to_copy.add(binary)
+                # Определяем исходники по пакету
+                source_key = '{}_{}'.format(*resolved)
+                if source_key in sources:
+                    continue
+                sources[source_key] = self.__sources(*resolved)
             logging.debug(_('Copying dependencies for package {}: {}').format(devpkg, files_to_copy))
             for f in files_to_copy:
-                src = os.path.join(self._conf.root, f)
-                dst = os.path.join(self._conf.frepodevdirpath, os.path.basename(f))
+                dst = os.path.join(frepodevdirpath, os.path.basename(f))
                 try:
-                    logging.debug(_('Copying {} to {}').format(src, dst))
-                    shutil.copyfile(src, dst)
+                    logging.debug(_('Copying {} to {}').format(f, dst))
+                    shutil.copyfile(f, dst)
                 except Exception as e:
+                    traceback.print_exc()
                     exit_with_error(e)
         # Копируем исходники для разрешенных репозиториев
         # Обращаем ключи словаря
@@ -1223,6 +1250,246 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             os.chdir(CURDIR)
 
 
+class RepositoryFullCache:
+    def __init__(self, conf):
+        self.__conf = conf
+        self.__caches = []
+
+    def load(self):
+        cache_paths = glob.glob(os.path.join(self.__conf.root, 'cache', self.__conf.distro, '*.cache')) + \
+                      glob.glob(os.path.join(self.__conf.cachedirpath, '*.cache'))
+        for cache_path in cache_paths:
+            self.__caches.append(RepositoryCache.load(self.__conf, cache_path))
+        self.__caches = sorted(self.__caches)
+        # Валидация
+        if len(self.__caches) <= 1:
+            exit_with_error(_('Caches for OS and OS-DEV repositories are required'))
+        for repo, repo_type in (('OS', PackageType.PACKAGE_FROM_OS_REPO),
+                                ('OS-DEV', PackageType.PACKAGE_FROM_OS_DEV_REPO)):
+            caches = self._cache_by_type(repo_type)
+            if len(caches) < 1:
+                exit_with_error(_('Cache for {} repo is required').format(repo))
+            elif len(caches) > 1:
+                logging.warning(_('Found {} {} repos').format(len(caches), repo))
+
+    def _cache_by_type(self, ctype):
+        return [c for c in self.__caches if c.ctype == ctype]
+
+    @property
+    def builded_cache(self):
+        return self._cache_by_type(PackageType.PACKAGE_BUILDED)[0]
+
+    def find_dependencies(self, dep, required_by):
+        ## Note: Тип, строка зависимости, котеж имя-версия пакета, зависимости
+        ## или PackageType.PACKAGE_NOT_FOUND, depstr, None, None
+        depstr = form_dependency(dep)
+        logging.debug(_('Finding dependency {} required by {} ...'.format(depstr, required_by)))
+        for c in self.__caches:
+            depinfo = c.find_dependency(dep)
+            if depinfo is not None:
+                resolved, deps = depinfo
+                logging.debug(_('Dependency {} resolved by {} = {} ({} repo)').format(
+                    depstr, *resolved, c.name))
+                return c.ctype, depstr, resolved, deps
+        logging.debug(_('Dependency {} NOT FOUND').format(depstr))
+        return PackageType.PACKAGE_NOT_FOUND, depstr, None, required_by
+
+
+class RepositoryCache:
+    import gzip
+    import json
+
+    FLAG_DESTINATION = 1 << 0
+    FLAG_DEPS = 1 << 1
+
+    def __init__(self, conf, name, ctype, packages=[]):
+        self.__conf = conf
+        self.__name = name
+        self.__ctype = ctype
+        if self.__ctype not in (PackageType.PACKAGE_FROM_OS_REPO,
+                                PackageType.PACKAGE_FROM_OS_DEV_REPO):
+            self.__cache_path = os.path.join(self.__conf.cachedirpath,
+                                             '{}.cache'.format(self.__name))
+        else:
+            self.__cache_path = os.path.abspath(os.path.join(self.__conf.cachedirpath, '..',
+                                                '{}.cache'.format(self.__name)))
+        self.__packages = packages
+
+    def __repr__(self):
+        return '{classname}: {name} ({type})'.format(classname=self.__class__.__name__,
+                                                     name=self.__name,
+                                                     type=self.__ctype)
+
+    def __len__(self):
+        return len(self.__packages)
+
+    def __lt__(self, other):
+        return self.__ctype < other.__ctype
+
+    @property
+    def cache_path(self):
+        return self.__cache_path
+
+    @property
+    def ctype(self):
+        return self.__ctype
+
+    @property
+    def name(self):
+        return self.__name
+
+    @property
+    def packages(self):
+        return (sorted(p.get('package') for p in self.__packages if p['virtual'] == False))
+
+    def create(self, packages_path):
+        def process_line_buffer(line_buffer):
+            pkginfo = {}
+            keys = ['Package', 'Version', 'PreDepends', 'Depends', 'Provides']
+            is_builded = self.__ctype == PackageType.PACKAGE_BUILDED
+            if is_builded:
+                keys.append('Source')
+            for line in line_buffer:
+                for key in keys:
+                    key_re = r'{}: (?P<value>.*)'.format(key)
+                    m = re.match(key_re, line)
+                    if m:
+                        value = m.group('value')
+                        if key in ('PreDepends', 'Depends', 'Provides'):
+                            value = apt_pkg.parse_depends(value)
+                        pkginfo[key.lower()] = value
+            pkginfo['virtual'] = False
+            full_pkginfo = []
+            if 'provides' in pkginfo:
+                provides = pkginfo.get('provides')
+                for item in provides:
+                    for subdep in item:
+                        pr_name, pr_version, pr_op = subdep
+                        pr_info = {
+                            'package': pr_name,
+                            'virtual': True,
+                            'real_package': pkginfo.get('package'),
+                            'real_version': pkginfo.get('version')
+                        }
+                        if len(pr_version):
+                            pr_info['version'] = pr_version
+                        if len(pr_op):
+                            pr_info['op'] = pr_op
+                        full_pkginfo.append(pr_info)
+            full_pkginfo.insert(0, pkginfo)
+            return full_pkginfo
+
+        packages = []
+        for path in packages_path:
+            try:
+                with self.gzip.open(path, mode='rb') as gfile:
+                    content = gfile.read().decode('utf-8', 'ignore')
+                    lines = content.split('\n')
+            except OSError:
+                with open(path, mode='r') as fp:
+                    lines = [line.rstrip('\n') for line in fp.readlines()]
+            line_buffer = []
+            idx_line = 0
+            while idx_line < len(lines):
+                line = lines[idx_line]
+                if len(line):
+                    line_buffer.append(line)
+                else:
+                    if len(line_buffer):
+                        packages += process_line_buffer(line_buffer)
+                        line_buffer.clear()
+                idx_line += 1
+        self.__packages = packages
+        # Запись на диск
+        with open(self.__cache_path, mode='w') as out:
+            cache_obj = {'name': self.__name,
+                         'ctype': self.__ctype,
+                         'packages': self.__packages}
+            out.write(self.json.dumps(cache_obj, sort_keys=True, indent=4))
+        return len(self) > 0
+
+    @classmethod
+    def load(cls, conf, cache_path):
+        try:
+            with open(cache_path, mode='r') as fp:
+                cache_obj = cls.json.load(fp)
+        except OSError as e:
+            exit_with_error(_('Failed to load cache in {}: {}').format(cache_path, e))
+        name = cache_obj.get('name', None)
+        if not name:
+            exit_with_error(_('Missing cache name in {}').format(cache_path))
+        ctype = cache_obj.get('ctype', None)
+        if ctype is None:
+            exit_with_error(_('Missing cache type in {}').format(cache_path))
+        else:
+            try:
+                ctype = int(ctype)
+                if not ctype in PackageType.available_types():
+                    raise RuntimeError()
+            except Exception as e:
+                exit_with_error(_('Bad cache type: {} in {}').format(ctype, cache_path))
+        packages = cache_obj.get('packages', None)
+        if packages is None:
+            exit_with_error(_('Missing packages in {}').format(cache_path))
+        return RepositoryCache(conf, name, ctype, packages)
+
+    def __check_dep(self, pkgver, depop, depver):
+        return (apt_pkg.check_dep(pkgver, depop, depver) or
+                pkgver == depver)
+
+    def __process_virtual_dependency(self, vdep):
+        vpkgname, vdepver, vdepop = vdep
+        for pkginfo in self.__packages:
+            pkgname, pkgver = pkginfo.get('package'), pkginfo.get('version')
+            if pkgname == vpkgname:
+                if self.__check_dep(pkgver, vdepver, vdepop):
+                    deptuple = (pkginfo.get('real_package'),
+                                pkginfo.get('real_version'),
+                                '=')
+                    logging.debug(_('Dependency {} is virtual, provided by {}').format(
+                        form_dependency(vdep), form_dependency(deptuple)))
+                    return self.find_dependency(deptuple)
+                assert 'Check virtual dependency failed'
+        return None
+
+    def find_dependency(self, dep):
+        def fix_debian_version(ver):
+            m = re.match(r'.*:(?P<realver>.*)', ver)
+            return m.group('realver') if m else ver
+
+        depname, depver, depop = dep
+        for pkginfo in self.__packages:
+            pkgname, pkgver = pkginfo.get('package'), pkginfo.get('version')
+            if pkgname == depname:
+                # Проверяем имя пакета и его версию
+                ## Hack по версиям
+                pkgver = fix_debian_version(pkgver)
+                depver = fix_debian_version(pkgver)
+                is_virtual = pkginfo.get('virtual')
+                if is_virtual:
+                    # Виртуальный?
+                    # Берем зависимости от реального пакета
+                    vdep = (pkgname,
+                            pkginfo.get('op', ''),
+                            pkginfo.get('version', ''))
+                    return self.__process_virtual_dependency(vdep)
+                if self.__check_dep(pkgver, depop, depver):
+                    return (pkgname, pkgver), pkginfo.get('depends', [])
+        return None
+
+    def source_package(self, binary_package, version):
+        for pkginfo in self.__packages:
+            pkgname, pkgver = pkginfo.get('package'), pkginfo.get('version')
+            # NB: Здесь используется проверка на вхождение по версии,
+            # поскольку имеет место быть несовпадение версии исходника и бинарного пакета
+            # например: 1:3.1+dfsg-2 и 3.1+dfsg-2
+            if binary_package == pkgname and version in pkgver:
+                # NB: Если source у пакета отстуствует, то
+                # это поле считается равным имени бинарного пакета
+                return pkginfo.get('source') or binary_package
+        return None
+
+
 class MakePackageCacheCmd(BaseCommand):
     CacheMapped = {
         'os': PackageType.PACKAGE_FROM_OS_REPO,
@@ -1236,53 +1503,26 @@ class MakePackageCacheCmd(BaseCommand):
                 ('--name', {'required': True, 'help': _('Set package name of repo')}),
                 ('--type', {'dest': 'ctype', 'required': True, 'choices': CacheMapped})
            )
-    __DIRECTIVE_PACKAGE = 'Package: '
-    __DIRECTIVE_VERSION = 'Version: '
-    __DIRECTIVE_DESCRIPTION_ENDS = ''
 
     def run(self, mount_path, name, ctype, info_message=True):
         if isinstance(ctype, str):
             ctype = self.CacheMapped.get(ctype)
         is_builded = (ctype == PackageType.PACKAGE_BUILDED)
         if not is_builded:
-            packages_path = Debhelper.find_packages_files(mount_path)
+            packages_path = []
+            dists_path = os.path.join(mount_path, 'dists')
+            for root, dirs, files in os.walk(dists_path):
+                if 'Packages.gz' in files:
+                    packages_path.append(os.path.join(root, 'Packages.gz'))
         else:
             packages_path = [os.path.join(mount_path, 'Packages')]
         if not len(packages_path):
-            exit_with_error(_('Can\'t find any Packages files in %s') % mount_path)
-        cache_file_path = os.path.join(self._conf.cachedirpath,
-                                       '{}.cache'.format(name))
-        result = {DIRECTIVE_CACHE_NAME: name,
-                  DIRECTIVE_CACHE_TYPE: ctype}
-        packages = []
-        for path in packages_path:
-            try:
-                with gzip.open(path, mode='rb') as gfile:
-                    content = gfile.read().decode('utf-8', 'ignore')
-                    lines = content.split('\n')
-            except OSError:
-                with open(path, mode='r') as fp:
-                    lines = [line.rstrip('\n') for line in fp.readlines()]
-            version = str()
-            package_name = str()
-            version = str()
-            for line in lines:
-                if line.startswith(self.__DIRECTIVE_PACKAGE):
-                    package_name = line.split(self.__DIRECTIVE_PACKAGE)[1]
-                elif line.startswith(self.__DIRECTIVE_VERSION):
-                    version = line.split(self.__DIRECTIVE_VERSION)[1]
-                elif line == self.__DIRECTIVE_DESCRIPTION_ENDS:
-                    data = {
-                        DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME: package_name,
-                        DIRECTIVE_CACHE_PACKAGES_PACKAGE_VERSION: version
-                    }
-                    packages.append(data)
-        result[DIRECTIVE_CACHE_PACKAGES] = packages
-        with open(cache_file_path, mode='w') as out:
-            out.write(json.dumps(result, sort_keys=True, indent=4))
+            exit_with_error(_('Can\'t find any Packages files in {}').format(mount_path))
+        c = RepositoryCache(self._conf, name, ctype)
+        if not c.create(packages_path):
+            exit_with_error(_('Cache creation failed'))
         if info_message:
-            logging.info(_('Cache saved to {}').format(cache_file_path))
-        return result
+            logging.info(_('Cache saved to {}').format(c.cache_path))
 
 
 class RemoveSourceCmd(BaseCommand):
@@ -1350,27 +1590,22 @@ class RemoveSourceCmd(BaseCommand):
 class RepoRuntimeDepsAnalyzerCmd(_RepoAnalyzerCmd):
     cmd = 'check-runtime-deps'
 
-    def __init__(self, conf_path):
-        super().__init__(conf_path)
-        self._mycache = [c for c in self._caches if c[DIRECTIVE_CACHE_TYPE] == PackageType.PACKAGE_BUILDED][0]
-
     def run(self):
         all_unresolved = []
         all_in_dev = []
-        for pkg_data in self._mycache[DIRECTIVE_CACHE_PACKAGES]:
-            current_package = pkg_data[DIRECTIVE_CACHE_PACKAGES_PACKAGE_NAME]
-            logging.info(_('Processing {} ...').format(current_package))
-            deps = self._get_depends_for_package(current_package)
-            unresolve = [d for d in deps if d[2] == PackageType.PACKAGE_NOT_FOUND]
-            deps_in_dev = [d for d in deps if d[2] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
+        for pkgname in self._builded_cache.packages:
+            logging.info(_('Processing {} ...').format(pkgname))
+            deps = self._get_depends_for_package(pkgname)
+            unresolve = [d for d in deps if d[0] == PackageType.PACKAGE_NOT_FOUND]
+            deps_in_dev = [d for d in deps if d[0] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
                                                        PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
             for dep in deps:
-                deptype = dep
+                deptype, depstr, resolved, required_by = dep
                 if deptype == PackageType.PACKAGE_NOT_FOUND:
-                    all_unresolved.append(dep)
+                    all_unresolved.append((deptype, depstr, None, required_by,))
                 elif deptype in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
                                  PackageType.PACKAGE_FROM_EXT_DEV_REPO):
-                    all_in_dev.append(dep)
+                    all_in_dev.append((deptype, depstr, form_dependency((*resolved, '=')), required_by,))
             all_unresolved += list(unresolve)
             all_in_dev += list(deps_in_dev)
         self._emit_deps_summary(all_unresolved, all_in_dev)
@@ -1438,7 +1673,8 @@ def register_atexit_callbacks():
         conf = Configuration(args.config)
         for item in (os.path.join(conf.root, 'logs'),
                      os.path.join(conf.root, 'repo'),
-                     conf.cachedirpath):
+                     conf.cachedirpath,
+                     conf.chrootsdirpath):
             _chown_recurse(item, sudo_user, sudo_group)
         # Файлы логов
         for file in (os.path.join(conf.root, 'logs', conf.distro, 'chroot-{}.log'.format(conf.distro)),
