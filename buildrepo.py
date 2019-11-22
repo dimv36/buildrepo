@@ -6,12 +6,10 @@ import logging
 import re
 import gettext
 import apt.debfile
-import glob
 import apt_pkg
+import glob
 import shutil
-import argparse
 import subprocess
-import time
 import datetime
 import configparser
 import contextlib
@@ -231,11 +229,20 @@ class ChrootDistributionInfo(dict):
 
 class NSPContainer:
     import tarfile
+    import io
+
     _FIRST_MIRROR = 0
     DEFAULT_DIST_COMPONENTS = ['main', 'contrib', 'non-free']
     DEFAULT_USER_PACKAGES = []
     CHROOT_REQUIRED_DEBS = ['dpkg-dev', 'fakeroot', 'quilt', 'sudo']
     CHROOT_COMPRESSION = 'xz'
+
+    class BuildLogger(io.FileIO):
+        _ansi_escape = re.compile(r'(?:\x1B[@-_]|[\x80-\x9F])[0-?]*[ -/]*[@-~]')
+
+        def write(self, data):
+            data = self._ansi_escape.sub('', data)
+            return super().write(data.encode('utf-8', errors='ignore'))
 
     def __init__(self, conf):
         self.__conf = conf
@@ -259,9 +266,10 @@ class NSPContainer:
         return self.__bind_directories
 
     def _exec_command_log(self, cmdargs, log_file, recreate_log=False):
+        import time
         mode = 'a' if os.path.exists(log_file) and not recreate_log else 'w'
         try:
-            logstream = open(log_file, mode=mode)
+            logstream = self.BuildLogger(log_file, mode='b' + mode)
         except OSError as e:
             exit_with_error(_('Error opening logfile: {}').format(e))
         if mode == 'a':
@@ -270,10 +278,13 @@ class NSPContainer:
         logstream.write('Executing {} ...\n'.format(' '.join(cmdargs)))
         logstream.flush()
         start = datetime.datetime.now()
-        # TODO: Отключить цвета в логе
-        proc = subprocess.Popen(cmdargs, stdout=logstream, stderr=logstream,
-                                universal_newlines=True)
-        proc.communicate()
+        with subprocess.Popen(cmdargs, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              universal_newlines=True) as proc:
+            while True:
+                data = proc.stdout.readline()
+                if not data:
+                    break
+                logstream.write(data)
         end = datetime.datetime.now() - start
         logstream.write('\nReturncode: {}'.format(proc.returncode))
         logstream.write('\nTime: {}\n'.format(time.strftime('%H:%M:%S', time.gmtime(end.seconds))))
@@ -285,9 +296,7 @@ class NSPContainer:
         if not nspawn_bin:
             exit_with_error(_('systemd-nspawn does not found'))
         nspawn_args = [nspawn_bin, '-D', container_path,
-                       '--hostname', self.__name,
-                       '-E', 'TERM=vt220',
-                       '-E', 'LC_ALL=C']
+                       '--hostname', self.__name, '-E', 'LC_ALL=C']
         for src, dstinfo in self.bind_directories.items():
             dst, mode = dstinfo
             if mode == 'ro':
@@ -601,7 +610,7 @@ class BuildCmd(BaseCommand):
 
     def __builded_list_str(self):
         return '\n'.join([p[self._BUILDED_PKGNAME]
-                          if not len([self._BUILDED_PKGVERSION])
+                          if not len(p[self._BUILDED_PKGVERSION])
                           else '{} = {}'.format(p[self._BUILDED_PKGNAME], p[self._BUILDED_PKGVERSION])
                           for p in self.__build_list])
 
@@ -1614,6 +1623,7 @@ def register_atexit_callbacks():
 
 
 if __name__ == '__main__':
+    import argparse
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest='command')
     cmdmap = available_commands()
