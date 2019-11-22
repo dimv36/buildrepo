@@ -11,19 +11,17 @@ import apt_pkg
 import shutil
 import argparse
 import subprocess
-import atexit
 import time
 import datetime
 import configparser
+import contextlib
 import traceback
-
-CURDIR = os.path.abspath(os.path.curdir)
+import warnings
 
 # gettext
 _ = gettext.gettext
 
 # Disable warnings
-import warnings
 warnings.filterwarnings('ignore')
 
 
@@ -37,6 +35,15 @@ def form_dependency(dep):
     if len(depver):
         return '{} ({} {})'.format(depname, depop, depver)
     return depname
+
+
+@contextlib.contextmanager
+def change_directory(newdirpath):
+    curdir = os.path.abspath(os.path.curdir)
+    if os.path.exists(newdirpath):
+        os.chdir(newdirpath)
+    yield
+    os.chdir(curdir)
 
 
 def run_command_log(cmdargs):
@@ -53,17 +60,16 @@ def run_command_log(cmdargs):
 
 
 def make_iso(isopath, target, label, tmpdir, sources_iso=False):
-    os.chdir(os.path.join(tmpdir, '..'))
-    what = 'iso' if not sources_iso else 'sources iso'
-    logging.info(_('Building {} {} for {} ...').format(what, isopath, target))
-    genisoimage_bin = shutil.which('genisoimage')
-    if not genisoimage_bin:
-        exit_with_error(_('Failed to find {} binary').format('genisoimage'))
-    if not run_command_log([genisoimage_bin, '-r','-J', '--joliet-long',
-                            '--iso-level', '3', '-o', isopath,
-                            '-V', '{}'.format(label), tmpdir]):
-        exit_with_error(_('Failed to create ISO image'))
-    os.chdir(CURDIR)
+    with change_directory(os.path.join(tmpdir, '..')):
+        what = 'iso' if not sources_iso else 'sources iso'
+        logging.info(_('Building {} {} for {} ...').format(what, isopath, target))
+        genisoimage_bin = shutil.which('genisoimage')
+        if not genisoimage_bin:
+            exit_with_error(_('Failed to find {} binary').format('genisoimage'))
+        if not run_command_log([genisoimage_bin, '-r', '-J', '--joliet-long',
+                                '--iso-level', '3', '-o', isopath,
+                                '-V', '{}'.format(label), tmpdir]):
+            exit_with_error(_('Failed to create ISO image'))
 
 
 class TemporaryDirManager:
@@ -99,9 +105,10 @@ class Configuration:
     _instance = None
     _inited = False
 
-    DEFAULT_BUILD_DIR = os.path.abspath(os.path.join(CURDIR, 'build'))
-    DEFAULT_CONF = os.path.join(CURDIR, 'buildrepo.conf')
-    DEFAULT_CHROOT_SCRIPT = os.path.join(CURDIR, 'chroot-helper.sh')
+    _CURDIR = os.getcwd()
+    DEFAULT_BUILD_DIR = os.path.join(_CURDIR, 'build')
+    DEFAULT_CONF = os.path.join(_CURDIR, 'buildrepo.conf')
+    DEFAULT_CHROOT_SCRIPT = os.path.join(_CURDIR, 'chroot-helper.sh')
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
@@ -141,11 +148,11 @@ class Configuration:
 
     def __init_logger(self):
         if os.path.exists(self.logsdirpath):
-            logname = os.path.join(self.root, self.distro, 'build-{}.log'.format(self.reponame))
+            logname = os.path.join(self.root, 'build-{}.log'.format(self.reponame))
             logging.basicConfig(level=logging.DEBUG,
                                 format='%(asctime)-8s %(levelname)-8s %(message)s',
                                 datefmt='%Y-%m-%d %H:%M:%S',
-                                filename=os.path.join(self.root, 'build-{}.log'.format(self.reponame)),
+                                filename=logname,
                                 filemode='a')
             console = logging.StreamHandler()
             console.setLevel(logging.INFO)
@@ -219,7 +226,7 @@ class ChrootDistributionInfo(dict):
                 items['build-user'] = self.CHROOT_BUILDER_DEFAULT
             self.update(items)
         else:
-            exit_with_error(_('No one mirror is present in section {}').format(section))
+            exit_with_error(_('No one mirror is present'))
 
 
 class NSPContainer:
@@ -330,22 +337,19 @@ class NSPContainer:
             try:
                 shutil.rmtree(self.deploypath)
             except Exception as e:
-                exit_with_error(_('Failed to remove deploy path {}').format(self.deploypath))
+                exit_with_error(_('Failed to remove deploy path {}: {}').format(self.deploypath, e))
         elif self.deployed():
             return
         logging.info(_('Deploying {} to {} ...').format(self.__name, self.deploypath))
-        try:
-            os.chdir(self.__conf.chrootsinstdirpath)
-            with self.tarfile.open(self.chroot_path,
-                                   mode='r:{}'.format(self.CHROOT_COMPRESSION)) as tf:
-                tf.extractall()
-            shutil.move(self.__name,
-                        self.hostname)
-        except Exception as e:
-            traceback.print_exc()
-            exit_with_error(_('Chroot deployment {} failed: {}').format(self.__name, e))
-        finally:
-            os.chdir(CURDIR)
+        with change_directory(self.__conf.chrootsinstdirpath):
+            try:
+                with self.tarfile.open(self.chroot_path,
+                                       mode='r:{}'.format(self.CHROOT_COMPRESSION)) as tf:
+                    tf.extractall()
+                shutil.move(self.__name, self.hostname)
+            except Exception as e:
+                traceback.print_exc()
+                exit_with_error(_('Chroot deployment {} failed: {}').format(self.__name, e))
 
     def build_package(self, dsc_file_path, jobs):
         # В первую очередь генерируем environment file,
@@ -358,9 +362,7 @@ class NSPContainer:
         # Файл создали, теперь формируем путь к логу
         m = re.match(r'.*/(?P<name>.*)_(?P<version>.*)\.dsc', dsc_file_path)
         pname, pversion = m.group('name'), m.group('version')
-        logdir = os.path.join(self.__conf.logsdirpath, self.__conf.reponame)
-        log_file = os.path.join(self.__conf.logsdirpath, '{}_{}.log'.format(
-            pname, pversion))
+        log_file = os.path.join(self.__conf.logsdirpath, '{}_{}.log'.format(pname, pversion))
         # Формируем команду на запуск
         logging.info(_('Package building {}-{} ...'.format(pname, pversion)))
         chroot_helper_path = os.path.join('/srv', os.path.basename(self.__conf.chroot_helper))
@@ -407,18 +409,20 @@ class NSPContainer:
                 # Сначала пропишем сборочный репозиторий
                 apt_sources.write('deb file:///srv repo/\n')
                 mirror_num = self._FIRST_MIRROR
+                components = ' '.join(self.__dist_info.get('components'))
                 for url in mirrors:
                     if url.startswith('file://'):
-                        old_url = url[7:]
                         # Требуется создать каталоги под репозитории
                         url = os.path.join('srv', 'mirrors', 'mirror{}'.format(mirror_num))
                         mirror_num += 1
                         os.makedirs(os.path.join(dist_chroot_dir, url))
-                        apt_sources.write('deb file:///{url} {dist} {components}\n'.format(
-                                          url=url, dist=self.__name, components=' '.join(self.__dist_info.get('components'))))
+                        apt_sources.write('deb file:///{url} {dist} {components}\n'.format(url=url,
+                                                                                           dist=self.__name,
+                                                                                           components=components))
                     else:
-                        apt_sources.write('deb {url} {dist} {components}\n'.format(
-                                          url=url, dist=self.__name, components=' '.join(self.__dist_info.get('components'))))
+                        apt_sources.write('deb {url} {dist} {components}\n'.format(url=url,
+                                                                                   dist=self.__name,
+                                                                                   components=components))
             # Подготавливаем APT
             chroot_apt_conf = os.path.join(dist_chroot_dir, 'etc', 'apt', 'apt.conf.d', '1000-buildrepo.conf')
             with open(chroot_apt_conf, mode='w') as apt_conf:
@@ -441,7 +445,7 @@ class NSPContainer:
             build_user = self.__dist_info.get('build-user')
             logging.info(_('Create user {} in chroot {} ...').format(build_user, self.__name))
             returncode = self._exec_nspawn(['/sbin/adduser', build_user,
-                                           '--disabled-password', '--gecos', 'chroot-builder'],
+                                            '--disabled-password', '--gecos', 'chroot-builder'],
                                            dist_chroot_dir, logpath)
             if returncode:
                 raise RuntimeError(_('User creation failed').format(build_user))
@@ -470,21 +474,19 @@ class NSPContainer:
                 if returncode:
                     raise RuntimeError(_('User selected packages installation in chroot failed'))
             # Создаем архив из chroot'а
-            os.chdir(tmpdir)
-            compressed_tar_path = os.path.join(tmpdir, '{}.tar.{}'.format(self.__name, self.CHROOT_COMPRESSION))
-            logging.info(_('Creating archive with chroot {} ...').format(self.__name))
-            with self.tarfile.open(compressed_tar_path,
-                                   mode='w:{}'.format(self.CHROOT_COMPRESSION)) as tf:
-                tf.add(self.__name, filter=chroot_exclude_filter)
-            # Move to chroot storage
-            dst = os.path.join(self.__conf.chrootsdirpath, '{}.tar.{}'.format(self.__name, self.CHROOT_COMPRESSION))
-            logging.info(_('Moving chroot to {} ...').format(dst))
-            shutil.move(compressed_tar_path, dst)
+            with change_directory(tmpdir):
+                compressed_tar_path = os.path.join(tmpdir, '{}.tar.{}'.format(self.__name, self.CHROOT_COMPRESSION))
+                logging.info(_('Creating archive with chroot {} ...').format(self.__name))
+                with self.tarfile.open(compressed_tar_path,
+                                       mode='w:{}'.format(self.CHROOT_COMPRESSION)) as tf:
+                    tf.add(self.__name, filter=chroot_exclude_filter)
+                # Move to chroot storage
+                dst = os.path.join(self.__conf.chrootsdirpath, '{}.tar.{}'.format(self.__name, self.CHROOT_COMPRESSION))
+                logging.info(_('Moving chroot to {} ...').format(dst))
+                shutil.move(compressed_tar_path, dst)
         except Exception as e:
             traceback.print_exc()
             exit_with_error(_('Chroot building failed: {}').format(e))
-        finally:
-            os.chdir(CURDIR)
 
 
 class BaseCommand:
@@ -519,6 +521,7 @@ class RepoInitializer(BaseCommand):
     """
     Класс выполняет подготовку при инициализации репозитория
     """
+
     def run(self):
         """
         Создает директории в корневой директории
@@ -538,7 +541,7 @@ class RepoInitializer(BaseCommand):
             logging.debug(_('Creating directory {} ...').format(directory))
             os.makedirs(directory, exist_ok=True)
         # Создаем пустой файл Packages в каталоге репозитория
-        with open(os.path.join(self._conf.repodirpath, 'Packages'), mode='w') as fp:
+        with open(os.path.join(self._conf.repodirpath, 'Packages'), mode='w'):
             pass
         logging.info(_('Succefully inited'))
 
@@ -547,19 +550,22 @@ class BuildCmd(BaseCommand):
     cmd = 'build'
     root_needed = True
     required_binaries = ['systemd-nspawn']
+    (_BUILDED_PKGNAME,
+     _BUILDED_PKGVERSION) = range(2)
     args = (
-                ('--rebuild', {'required': False, 'nargs': '+', 'default': [],
-                               'help': _('Specify package(s) for force rebuilding')}),
-                ('--rebuild-all', {'required': False, 'action': 'store_true',
-                                   'default': False, 'help': _('Rebuild all packages in list')}),
-                ('--clean', {'required': False, 'action': 'store_true',
-                             'default': False, 'help': _('Remove installed packages on time of repo initializing')}),
-                ('--jobs', {'required': False, 'type': int, 'default': 2, 'help': _('Jobs count for building')})
-           )
+        ('--rebuild', {'required': False, 'nargs': '+', 'default': [],
+                       'help': _('Specify package(s) for force rebuilding')}),
+        ('--rebuild-all', {'required': False, 'action': 'store_true',
+                           'default': False, 'help': _('Rebuild all packages in list')}),
+        ('--clean', {'required': False, 'action': 'store_true',
+                     'default': False, 'help': _('Remove installed packages on time of repo initializing')}),
+        ('--jobs', {'required': False, 'type': int, 'default': 2, 'help': _('Jobs count for building')})
+    )
 
     """
     Класс выполняет сборку пакетов
     """
+
     def __init__(self, conf_path):
         super().__init__(conf_path)
         self.__build_list = []
@@ -584,16 +590,20 @@ class BuildCmd(BaseCommand):
                 if len(tokens) == 1:
                     self.__build_list.append((line, ''))
                 elif len(tokens) == 2:
-                    self.__build_list.append((tokens[0], tokens[1]))
+                    self.__build_list.append((tokens[self._BUILDED_PKGNAME], tokens[self._BUILDED_PKGVERSION]))
                 else:
                     logging.warning(_('Mailformed line {} in {}').format(line, scenario_path))
                     continue
         if not len(self.__build_list):
             logging.warning(_('No one sources are found in {}').format(scenario_path))
             exit(0)
-        logging.info(_('Following packages are found in build list: \n{}').format(
-                        '\n'.join([p[0] if not len(p[1]) else '{} = {}'.format(p[0], p[1])
-                                   for p in self.__build_list])))
+        logging.info(_('Following packages are found in build list: \n{}').format(self.__builded_list_str()))
+
+    def __builded_list_str(self):
+        return '\n'.join([p[self._BUILDED_PKGNAME]
+                          if not len([self._BUILDED_PKGVERSION])
+                          else '{} = {}'.format(p[self._BUILDED_PKGNAME], p[self._BUILDED_PKGVERSION])
+                          for p in self.__build_list])
 
     def __check_if_build_required(self, package, version, force_rebuild_list):
         # В зависимости от версии определяем набор исходников для сборки
@@ -615,7 +625,7 @@ class BuildCmd(BaseCommand):
         pversion = re.match(r'.*_(?P<version>.*)\.dsc', dscfilepath).group('version')
         need_rebuild = False
         # Если уже требуется пересборка, выходим
-        if package in [p[0] for p in force_rebuild_list]:
+        if package in force_rebuild_list:
             return (True, dscfilepath)
         # Открываем dsc file, читаем список файлов
         try:
@@ -659,9 +669,9 @@ class BuildCmd(BaseCommand):
                     dst_sources_list = [os.path.join(dist_chroot.abs_sources_dir, source)
                                         for source in sources_list]
                     for source, dst in zip(sources_list, dst_sources_list):
-                       src = os.path.join(self._conf.srcdirpath, source)
-                       logging.debug(_('Copying {} to {} ...').format(src, dst))
-                       shutil.copy(src, dst)
+                        src = os.path.join(self._conf.srcdirpath, source)
+                        logging.debug(_('Copying {} to {} ...').format(src, dst))
+                        shutil.copy(src, dst)
                 except Exception:
                     traceback.print_exc()
                     exit_with_error(_('Failed to determine sources of package {}').format(pkgname))
@@ -682,9 +692,7 @@ class BuildCmd(BaseCommand):
                 logging.warning(_('Package rebuilding {} ignored, '
                                   'because options --rebuild-all specified').format(', '.join(rebuild)))
             rebuild = self.__build_list
-            logging.warning(_('Will be rebuilded following packages: {}').format(
-                ', '.join([p[0] if not len(p[1]) else '{} = {}'.format(p[0], p[1])
-                                   for p in self.__build_list])))
+            logging.warning(_('Will be rebuilded following packages: {}').format(self.__builded_list_str()))
         self.__make_build(jobs, rebuild, clean)
 
 
@@ -698,12 +706,17 @@ class PackageType:
 
     @classmethod
     def available_types(cls):
-        for obj in filter(lambda x: x.startswith('PACKAGE') , dir(cls)):
+        for obj in filter(lambda x: x.startswith('PACKAGE'), dir(cls)):
             yield getattr(cls, obj)
+
 
 class DependencyFinder:
     FLAG_FINDER_MAIN = 1 << 0
     FLAG_FINDER_DEV = 1 << 1
+    (DF_DEST,
+     DF_PKGINFO,
+     DF_RESOLVED,
+     DF_REQUIRED) = range(4)
 
     def __init__(self, pkgname, rfcache, conf,
                  exclude_rules=None, black_list=[], flags=FLAG_FINDER_MAIN):
@@ -734,7 +747,7 @@ class DependencyFinder:
                 self.__seendeps.append(seen_item)
                 if depdest == PackageType.PACKAGE_NOT_FOUND:
                     i = (depdest, pdstinfo, resolved, required_by)
-                    assert (len(i) == 4), (item, len(i))
+                    assert (len(i) == 4), (i, len(i))
                     if i not in s:
                         s.append(i)
                 else:
@@ -802,8 +815,6 @@ class DependencyFinder:
             pkg_glob_re = os.path.join(self.__conf.repodirpath, '{}_{}_*.deb'.format(pkgname, version))
         else:
             version = versions[0]
-        pkgpath = packages[0]
-        deb_package = apt.debfile.DebPackage(filename=pkgpath)
         # Нашли зависимости?
         pkg = (pkgname, version, '=')
         depitem = (PackageType.PACKAGE_BUILDED,         # Где есть зависимость
@@ -812,38 +823,6 @@ class DependencyFinder:
                    form_dependency(pkg))                # Строка зависимости
         self.__deps.append(depitem)
         return pkg
-
-    def __process_exclude_filters(self, s, p):
-        if self.__exclude_rules is not None:
-            candidate = p.versions[0]
-            package_name, package_ver = candidate.source_name, fix_package_version(candidate.source_version)
-            dscfilepath = '%s/%s_%s.dsc' % (self.__conf.srcdirpath, package_name, package_ver)
-            try:
-                dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
-                for binary in dscfile.binaries:
-                    skip_package = False
-                    for exl in self.__exclude_rules:
-                        if binary.endswith(exl):
-                            skip_package = True
-                            break
-                    if not skip_package:
-                        paddition = cache.get(binary)
-                        if not paddition:
-                            exit_with_error(_('Package %s does not exists') % paddition)
-                        # Black list
-                        if binary not in self.__black_list:
-                            item = (paddition.name, paddition,
-                                    self.__get_package_repository(paddition, paddition))
-                            if item not in s:
-                                s.append(item)
-                                self.__deps_recurse(s, paddition)
-                        else:
-                            logging.info(_('Package %s skipped because blacklist rule') % binary)
-                    else:
-                        logging.debug(_('Package %s skipped because \'%s\' rule') % (
-                            binary, ' '.join(self.__exclude_rules)))
-            except apt_pkg.Error as e:
-                exit_with_error(e)
 
 
 class _RepoAnalyzerCmd(BaseCommand):
@@ -968,8 +947,8 @@ class DebianIsoRepository:
     def __init__(self, conf, tmpdir, is_dev):
         self.__conf = conf
         self.__is_dev = is_dev
-        self.__tmpdir = os.path.join(tmpdir, '{}_{}_iso'.format(self.__conf.reponame,
-                                     'main' if not is_dev else 'dev'))
+        repotype = 'main' if not is_dev else 'dev'
+        self.__tmpdir = os.path.join(tmpdir, '{}_{}_iso'.format(self.__conf.reponame, repotype))
         self.__name = self.__conf.reponame
         if self.__is_dev:
             self.__name = '{}-devel'.format(self.__name)
@@ -997,10 +976,9 @@ class DebianIsoRepository:
         self.__reprepro_bin = shutil.which('reprepro')
         if self.__reprepro_bin is None:
             exit_with_error(_('Failed to find reprepro binary'))
-        os.chdir(self.__tmpdir)
-        if not run_command_log([self.__reprepro_bin, 'export']):
-            exit_with_error(_('Reprepro initialization failed'))
-        os.chdir(CURDIR)
+        with change_directory(self.__tmpdir):
+            if not run_command_log([self.__reprepro_bin, 'export']):
+                exit_with_error(_('Reprepro initialization failed'))
         disk_directory = os.path.join(self.__tmpdir, '.disk')
         os.makedirs(disk_directory, exist_ok=True)
         with open(os.path.join(disk_directory, 'info'), mode='w') as fp:
@@ -1010,15 +988,15 @@ class DebianIsoRepository:
                                                                              arch=self.__arch))
 
     def create(self, packagesdir):
-        os.chdir(self.__tmpdir)
-        logging.info(_('Creating repository for {} via reprepro ...').format(self.__name))
-        for package in glob.glob('{}/*.deb'.format(packagesdir)):
-            if not run_command_log([self.__reprepro_bin, 'includedeb',
-                                    self.__name, package]):
-                exit_with_error(_('Including binaries to repo failure'))
-        # Удаление ненужных директорий
-        for directory in ['db', 'conf']:
-            shutil.rmtree(directory)
+        with change_directory(self.__tmpdir):
+            logging.info(_('Creating repository for {} via reprepro ...').format(self.__name))
+            for package in glob.glob('{}/*.deb'.format(packagesdir)):
+                if not run_command_log([self.__reprepro_bin, 'includedeb',
+                                        self.__name, package]):
+                    exit_with_error(_('Including binaries to repo failure'))
+            # Удаление ненужных директорий
+            for directory in ['db', 'conf']:
+                shutil.rmtree(directory)
         now = datetime.datetime.now().strftime('%Y-%m-%d')
         isoname = '{repo}_{version}_{distro}_{date}.iso'.format(repo=self.__name,
                                                                 version=self.__conf.repoversion,
@@ -1178,7 +1156,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         # Копируем исходники
         shutil.copytree(fsrcdirpath, os.path.join(sources_iso_tmpdir, 'src'))
         # Копируем файлы для сборки дистрибутива
-        required_files = [os.path.abspath(sys.argv[0]),
+        required_files = [os.path.abspath(os.path.abspath(sys.argv[0])),
                           os.path.abspath(self._conf.chroot_helper),
                           os.path.abspath(self._conf.parser.get(BuildCmd.cmd, 'source-list')),
                           os.path.abspath(self._conf.parser.get(MakeRepoCmd.alias, 'white-list'))]
@@ -1190,9 +1168,9 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             shutil.copyfile(req, os.path.join(sources_iso_tmpdir, os.path.basename(req)))
         now = datetime.datetime.now().strftime('%Y-%m-%d')
         isoname = 'sources-{}_{}_{}_{}.iso'.format(self._conf.reponame,
-                                                    self._conf.repoversion,
-                                                    self._conf.distro,
-                                                    now)
+                                                   self._conf.repoversion,
+                                                   self._conf.distro,
+                                                   now)
         isopath = os.path.join(self._conf.isodirpath, isoname)
         label = '{} {} (sources)'.format(self._conf.reponame, self._conf.repoversion)
         make_iso(isopath, self._conf.reponame, label, sources_iso_tmpdir, sources_iso=True)
@@ -1204,8 +1182,8 @@ class RepositoryFullCache:
         self.__caches = []
 
     def load(self):
-        cache_paths = glob.glob(os.path.join(self.__conf.root, 'cache', self.__conf.distro, '*.cache')) + \
-                      glob.glob(os.path.join(self.__conf.cachedirpath, '*.cache'))
+        cache_paths = (glob.glob(os.path.join(self.__conf.root, 'cache', self.__conf.distro, '*.cache')) +
+                       glob.glob(os.path.join(self.__conf.cachedirpath, '*.cache')))
         for cache_path in cache_paths:
             self.__caches.append(RepositoryCache.load(self.__conf, cache_path))
         self.__caches = sorted(self.__caches)
@@ -1228,8 +1206,8 @@ class RepositoryFullCache:
         return self._cache_by_type(PackageType.PACKAGE_BUILDED)[0]
 
     def find_dependencies(self, dep, required_by):
-        ## Note: Тип, строка зависимости, котеж имя-версия пакета, зависимости
-        ## или PackageType.PACKAGE_NOT_FOUND, depstr, None, None
+        # Note: Тип, строка зависимости, котеж имя-версия пакета, зависимости
+        # или PackageType.PACKAGE_NOT_FOUND, depstr, None, None
         depstr = form_dependency(dep)
         logging.debug(_('Finding dependency {} required by {} ...'.format(depstr, required_by)))
         for c in self.__caches:
@@ -1259,8 +1237,8 @@ class RepositoryCache:
             self.__cache_path = os.path.join(self.__conf.cachedirpath,
                                              '{}.cache'.format(self.__name))
         else:
-            self.__cache_path = os.path.abspath(os.path.join(self.__conf.cachedirpath, '..',
-                                                '{}.cache'.format(self.__name)))
+            cache_path = os.path.join(self.__conf.cachedirpath, '..', '{}.cache'.format(self.__name))
+            self.__cache_path = os.path.abspath(cache_path)
         self.__packages = packages
 
     def __repr__(self):
@@ -1288,7 +1266,7 @@ class RepositoryCache:
 
     @property
     def packages(self):
-        return (sorted(p.get('package') for p in self.__packages if p['virtual'] == False))
+        return (sorted(p.get('package') for p in self.__packages if not p['virtual']))
 
     def create(self, packages_path):
         def process_line_buffer(line_buffer):
@@ -1372,10 +1350,10 @@ class RepositoryCache:
         else:
             try:
                 ctype = int(ctype)
-                if not ctype in PackageType.available_types():
-                    raise RuntimeError()
+                if ctype not in PackageType.available_types():
+                    raise RuntimeError(_('Unexpected cache type in {}').format(cache_path))
             except Exception as e:
-                exit_with_error(_('Bad cache type: {} in {}').format(ctype, cache_path))
+                exit_with_error(_('Bad cache type: {} in {}').format(ctype, cache_path, e))
         packages = cache_obj.get('packages', None)
         if packages is None:
             exit_with_error(_('Missing packages in {}').format(cache_path))
@@ -1410,7 +1388,7 @@ class RepositoryCache:
             pkgname, pkgver = pkginfo.get('package'), pkginfo.get('version')
             if pkgname == depname:
                 # Проверяем имя пакета и его версию
-                ## Hack по версиям
+                # NB: получаем корректную версию
                 pkgver = fix_debian_version(pkgver)
                 depver = fix_debian_version(pkgver)
                 is_virtual = pkginfo.get('virtual')
@@ -1447,10 +1425,10 @@ class MakePackageCacheCmd(BaseCommand):
     }
     cmd = 'make-package-cache'
     args = (
-                ('--mount-path', {'required': True, 'help': _('Set path to repo\'s mount point')}),
-                ('--name', {'required': True, 'help': _('Set package name of repo')}),
-                ('--type', {'dest': 'ctype', 'required': True, 'choices': CacheMapped})
-           )
+        ('--mount-path', {'required': True, 'help': _('Set path to repo\'s mount point')}),
+        ('--name', {'required': True, 'help': _('Set package name of repo')}),
+        ('--type', {'dest': 'ctype', 'required': True, 'choices': CacheMapped})
+    )
 
     def run(self, mount_path, name, ctype, info_message=True):
         if isinstance(ctype, str):
@@ -1476,10 +1454,10 @@ class MakePackageCacheCmd(BaseCommand):
 class RemoveSourceCmd(BaseCommand):
     cmd = 'remove-sources'
     args = (
-                ('--package', {'required': True, 'help': _('Source package name to be removed')}),
-                ('--remove-orig', {'dest': 'remove_orig', 'action': 'store_true',
-                 'default': False, 'help': _('Remove *.orig.tar.* source file, default: False')})
-           )
+        ('--package', {'required': True, 'help': _('Source package name to be removed')}),
+        ('--remove-orig', {'dest': 'remove_orig', 'action': 'store_true',
+                           'default': False, 'help': _('Remove *.orig.tar.* source file, default: False')})
+    )
 
     def run(self, package, remove_orig=False):
         expr = '%s/%s_*.dsc' % (self._conf.srcdirpath, package)
@@ -1632,6 +1610,7 @@ def register_atexit_callbacks():
     import atexit
     atexit.register(remove_temp_directory_atexit_callback)
     atexit.register(chown_files_atexit_callback)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
