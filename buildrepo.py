@@ -63,12 +63,11 @@ def make_iso(isopath, target, label, tmpdir, sources_iso=False):
     with change_directory(os.path.join(tmpdir, '..')):
         what = 'iso' if not sources_iso else 'sources iso'
         logging.info(_('Building {} {} for {} ...').format(what, isopath, target))
-        genisoimage_bin = shutil.which('genisoimage')
-        if not genisoimage_bin:
-            exit_with_error(_('Failed to find {} binary').format('genisoimage'))
-        if not run_command_log([genisoimage_bin, '-r', '-J', '--joliet-long',
-                                '--iso-level', '3', '-o', isopath,
-                                '-V', '{}'.format(label), tmpdir]):
+        xorrisofs_bin = shutil.which('xorrisofs')
+        if not xorrisofs_bin:
+            exit_with_error(_('Failed to find {} binary').format('xorrisofs'))
+        if not run_command_log([xorrisofs_bin, '-r', '-J', '-joliet-long',
+                                '-o', isopath, tmpdir]):
             exit_with_error(_('Failed to create ISO image'))
 
 
@@ -1012,7 +1011,7 @@ class DebianIsoRepository:
 
 class MakeRepoCmd(_RepoAnalyzerCmd):
     cmd = 'make-repo'
-    required_binaries = ['reprepro', 'genisoimage']
+    required_binaries = ['reprepro', 'xorrisofs']
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
 
     def __init__(self, conf_path):
