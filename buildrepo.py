@@ -1048,17 +1048,17 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             deps = self._get_depends_for_package(required,
                                                  exclude_rules=self._dev_packages_suffixes,
                                                  black_list=self._packages.get('target-dev', []))
-            unresolve = [d for d in deps if d[0] == PackageType.PACKAGE_NOT_FOUND]
-            deps_in_dev = [d for d in deps if d[0] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
-                                                       PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
+            unresolve = [d for d in deps if d[DependencyFinder.DF_DEST] == PackageType.PACKAGE_NOT_FOUND]
+            deps_in_dev = [d for d in deps if d[DependencyFinder.DF_DEST] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
+                                                                              PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
             if len(unresolve):
                 self._emit_unresolved(unresolve)
             if len(deps_in_dev):
                 self._emit_resolved_in_dev(deps_in_dev)
-            target_deps = [d for d in deps if d[0] == PackageType.PACKAGE_BUILDED]
+            target_deps = [d for d in deps if d[DependencyFinder.DF_DEST] == PackageType.PACKAGE_BUILDED]
             files_to_copy = set()
             for p in target_deps:
-                resolved = p[2]
+                resolved = p[DependencyFinder.DF_RESOLVED]
                 source_key = '{}_{}'.format(*resolved)
                 if source_key in sources.keys():
                     continue
@@ -1092,10 +1092,11 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         for devpkg in dev_packages:
             logging.info(_('Processing {} ...').format(devpkg))
             deps = self._get_depends_for_package(devpkg, flags=DependencyFinder.FLAG_FINDER_DEV)
-            unresolve = [d for d in deps if d[0] == PackageType.PACKAGE_NOT_FOUND]
+            unresolve = [d for d in deps if d[DependencyFinder.DF_DEST] == PackageType.PACKAGE_NOT_FOUND]
             if len(unresolve):
                 self._emit_unresolved(unresolve)
-            builded = [d[2] for d in deps if d[0] == PackageType.PACKAGE_BUILDED]
+            builded = [d[DependencyFinder.DF_RESOLVED] for d in deps
+                       if d[DependencyFinder.DF_DEST] == PackageType.PACKAGE_BUILDED]
             # Определяем файлы для копирования на второй диск
             files_to_copy = set()
             for resolved in builded:
