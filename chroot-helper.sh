@@ -99,6 +99,6 @@ mv *.deb ../repo
 popd &> /dev/null # Dir with sources
 
 # Generate packages list
-dpkg-scanpackages 2>/dev/null repo > repo/Packages
+dpkg-scanpackages --multiversion 2>/dev/null repo > repo/Packages
 
 exit 0
