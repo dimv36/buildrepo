@@ -1462,22 +1462,39 @@ class MakePackageCacheCmd(BaseCommand):
 
 
 class RemoveSourceCmd(BaseCommand):
+    import collections
+
     cmd = 'remove-sources'
     args = (
         ('--package', {'required': True, 'help': _('Source package name to be removed')}),
-        ('--remove-orig', {'dest': 'remove_orig', 'action': 'store_true',
-                           'default': False, 'help': _('Remove *.orig.tar.* source file, default: False')})
     )
 
-    def run(self, package, remove_orig=False):
-        expr = '%s/%s_*.dsc' % (self._conf.srcdirpath, package)
+    def __process_line_buffer(self, line_buffer):
+        last_processing = None
+        pkginfo = self.collections.OrderedDict()
+        for line in line_buffer:
+            m = re.match(r'(?P<name>.*): (?P<value>.*)', line)
+            if m:
+                last_processing = m.group('name')
+                pkginfo[last_processing] = m.group('value')
+            else:
+                value = pkginfo.get(last_processing)
+                if isinstance(value, str):
+                    value = [value] + [line]
+                elif isinstance(value, list):
+                    value += [line]
+                pkginfo[last_processing] = value
+        return pkginfo
+
+    def run(self, package):
+        expr = os.path.join(self._conf.srcdirpath, '{}_*.dsc'.format(package))
         sources = glob.glob(expr)
         if not len(sources):
             exit_with_error(_('No sources are found'))
         sys.stdout.write(_('The following sources are found:\n'))
         dscfiles = {num + 1: source for (num, source) in enumerate(sources)}
-        for num, dsc in enumerate(sources):
-            sys.stdout.write('%d\t%s\n' % (num + 1, os.path.basename(dsc)))
+        for num, dsc in dscfiles.items():
+            sys.stdout.write('{}\t{}\n'.format(num, os.path.basename(dsc)))
         while True:
             try:
                 choice = int(input(_('\nChoose source to be removed:\n')))
@@ -1487,27 +1504,50 @@ class RemoveSourceCmd(BaseCommand):
                 continue
             dscfilepath = dscfiles.get(choice)
             break
-        dscfilepath = os.path.join(self._conf.srcdirpath, dscfilepath)
+        m = re.match(r'(?P<name>.*)_(?P<version>.*).dsc', dscfilepath)
+        version = m.group('version')
+        if not m:
+            exit_with_error(_('Failed to determine package and version of {}').format(dscfilepath))
+        sources_to_remove = []
         dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
-        sources = [dscfilepath] + [os.path.join(self._conf.srcdirpath, source)
-                                   for source in dscfile.filelist]
-        if not remove_orig:
-            orig = None
-            for source in sources:
-                if re.match('.*\\.orig\\..*', source):
-                    orig = source
-                    break
-            if orig:
-                sources.remove(orig)
-        binaries = []
-        pver = dscfile['Version']
-        for binary in dscfile.binaries:
-            expr = '%s/%s_%s*deb' % (self._conf.repodirpath, binary, pver)
-            dbg_expr = '%s/%s-dbgsym_%s*deb' % (self._conf.repodirpath, binary, pver)
-            binaries = binaries + glob.glob(expr) + glob.glob(dbg_expr)
-        logging.info(_('The following sources will be removed: %s' % ', '.join(sources)))
-        if len(binaries):
-            logging.info(_('The following binaries will be removed: %s:' % ', '.join(binaries)))
+        sources_to_remove = [dscfilepath] + [os.path.join(self._conf.srcdirpath, source)
+                                             for source in dscfile.filelist]
+        packages_path = os.path.join(self._conf.repodirpath, 'Packages')
+        packages_info = []
+        try:
+            with open(packages_path, mode='r') as fp:
+                lines = [line.rstrip('\n') for line in fp.readlines()]
+            idx_line = 0
+            lines_buffer = []
+            while idx_line < len(lines):
+                line = lines[idx_line]
+                if len(line):
+                    lines_buffer.append(line)
+                else:
+                    if len(lines_buffer):
+                        packages_info.append(self.__process_line_buffer(lines_buffer))
+                        lines_buffer.clear()
+                idx_line += 1
+        except Exception as e:
+            exit_with_error(_('Failed parsing Packages file: {}').format(e))
+        # Определяем бинарные пакеты на удаление
+        binary_to_remove = []
+        binary_packages_to_remove = []
+        binary_version = None
+        for pkginfo in packages_info:
+            pkgname, pkgversion, pkgsource = pkginfo.get('Package'), pkginfo.get('Version'), pkginfo.get('Source', None)
+            if pkgname == package or pkgsource == package:
+                if version in pkgversion:
+                    binary_version = pkgversion
+                    binary_to_remove.append(pkgname)
+                    binary_glob_re = os.path.join(self._conf.repodirpath, '{}_{}_*.deb'.format(pkgname, version))
+                    binary_packages_to_remove += glob.glob(binary_glob_re)
+        sys.stdout.write(_('\nThe following sources will be removed:\n'))
+        for src in sources_to_remove:
+            sys.stdout.write('\t{}\n'.format(src))
+        sys.stdout.write(_('\nThe following binaries will be removed:\n'))
+        for binary in binary_packages_to_remove:
+            sys.stdout.write('\t{}\n'.format(binary))
         while True:
             answer = input(_('Do you want to continue? (yes/NO): '))
             if not len(answer) or answer == _('NO'):
@@ -1515,12 +1555,29 @@ class RemoveSourceCmd(BaseCommand):
                 exit(0)
             elif answer == _('yes'):
                 break
-        for f in sources + binaries:
-            try:
-                logging.info(_('Removing %s ...') % f)
-                os.remove(f)
-            except OSError as e:
-                exit_with_error(_('Failed to remove file %s: %s' % (f, e)))
+        # Переписываем Packages файл
+        packages_backup_path = '{}.bak'.format(packages_path)
+        with open(packages_backup_path, mode='w') as fp:
+            for pkginfo in packages_info:
+                pkgname, pkgver = pkginfo.get('Package'), pkginfo.get('Version')
+                if (pkgname in binary_to_remove and pkgver == binary_version):
+                    continue
+                for key, value in pkginfo.items():
+                    if isinstance(value, str):
+                        fp.write('{}: {}\n'.format(key, value))
+                    elif isinstance(value, list):
+                        fp.write('{}: {}\n'.format(key, value[0]))
+                        for row in value[1:]:
+                            fp.write('{}\n'.format(row))
+                fp.write('\n')
+        # Удаляем бинари и исходники
+        try:
+            for filepath in sources_to_remove + binary_packages_to_remove:
+                os.remove(filepath)
+            # Заменяем Packages файл нашим сгенерированным
+            shutil.move(packages_backup_path, packages_path)
+        except Exception as e:
+            exit_with_error(_('Sources removing failed: {}').format(e))
 
 
 class RepoRuntimeDepsAnalyzerCmd(_RepoAnalyzerCmd):
