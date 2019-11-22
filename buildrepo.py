@@ -144,6 +144,14 @@ class Configuration:
         tmpdirmanager.set_basedir(self.tmpdirpath)
         self._inited = True
 
+    def repository_inited(self):
+        dir_attrs = [attr for attr in dir(self) if attr.endswith('dirpath')]
+        for attr in dir_attrs:
+            val = getattr(self, attr)
+            if not os.path.exists(val):
+                return False
+        return True
+
     def __init_logger(self):
         if os.path.exists(self.logsdirpath):
             logname = os.path.join(self.root, 'build-{}.log'.format(self.reponame))
@@ -267,31 +275,35 @@ class NSPContainer:
 
     def _exec_command_log(self, cmdargs, log_file, recreate_log=False):
         import time
-        mode = 'a' if os.path.exists(log_file) and not recreate_log else 'w'
-        try:
-            logstream = self.BuildLogger(log_file, mode='b' + mode)
-        except OSError as e:
-            exit_with_error(_('Error opening logfile: {}').format(e))
-        if mode == 'a':
-            logstream.write('\n')
+        if log_file:
+            mode = 'a' if os.path.exists(log_file) and not recreate_log else 'w'
+            try:
+                logstream = self.BuildLogger(log_file, mode='b' + mode)
+            except OSError as e:
+                exit_with_error(_('Error opening logfile: {}').format(e))
+            if mode == 'a':
+                logstream.write('\n')
+                logstream.flush()
+            logstream.write('Executing {} ...\n'.format(' '.join(cmdargs)))
             logstream.flush()
-        logstream.write('Executing {} ...\n'.format(' '.join(cmdargs)))
-        logstream.flush()
-        start = datetime.datetime.now()
-        with subprocess.Popen(cmdargs, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              universal_newlines=True) as proc:
-            while True:
-                data = proc.stdout.readline()
-                if not data:
-                    break
-                logstream.write(data)
-        end = datetime.datetime.now() - start
-        logstream.write('\nReturncode: {}'.format(proc.returncode))
-        logstream.write('\nTime: {}\n'.format(time.strftime('%H:%M:%S', time.gmtime(end.seconds))))
-        logstream.close()
+            start = datetime.datetime.now()
+            with subprocess.Popen(cmdargs, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  universal_newlines=True) as proc:
+                while True:
+                    data = proc.stdout.readline()
+                    if not data:
+                        break
+                    logstream.write(data)
+            end = datetime.datetime.now() - start
+            logstream.write('\nReturncode: {}'.format(proc.returncode))
+            logstream.write('\nTime: {}\n'.format(time.strftime('%H:%M:%S', time.gmtime(end.seconds))))
+            logstream.close()
+        else:
+            proc = subprocess.Popen(cmdargs, universal_newlines=True)
+            proc.communicate()
         return proc.returncode
 
-    def _exec_nspawn(self, cmdargs, container_path, log_file, recreate_log=False):
+    def _exec_nspawn(self, cmdargs, container_path, log_file=None, recreate_log=False):
         nspawn_bin = shutil.which('systemd-nspawn')
         if not nspawn_bin:
             exit_with_error(_('systemd-nspawn does not found'))
@@ -379,6 +391,10 @@ class NSPContainer:
                                        self.deploypath, log_file, recreate_log=True)
         if returncode:
             raise RuntimeError(_('Package building {} failed').format(pname))
+
+    def login(self):
+        if self._exec_nspawn(['/bin/bash'], self.deploypath, log_file=None):
+            raise RuntimeError(_('Failed to login to deployed container {}'.format(self.name)))
 
     def create(self):
         def chroot_exclude_filter(tarinfo):
@@ -501,16 +517,19 @@ class NSPContainer:
 class BaseCommand:
     cmd = None
     alias = None
-    root_needed = False
+    root_required = False
     required_binaries = []
 
     def __init__(self, conf):
         if not os.path.exists(os.path.dirname(conf)):
             os.makedirs(os.path.dirname(conf))
         self._conf = Configuration(conf)
-        if self.root_needed and not os.getuid() == 0:
+        if self.root_required and not os.getuid() == 0:
             exit_with_error(_('Must be run as superuser'))
         self.__check_required_binaries()
+        if not self.cmd == 'init' and not self._conf.repository_inited():
+            exit_with_error(_('Required directories not created. '
+                              'Please, run `{} init` first.').format(sys.argv[0]))
 
     def __check_required_binaries(self):
         missing_binaries = []
@@ -525,7 +544,7 @@ class BaseCommand:
         raise NotImplementedError()
 
 
-class RepoInitializer(BaseCommand):
+class RepoInitializerCmd(BaseCommand):
     cmd = 'init'
     """
     Класс выполняет подготовку при инициализации репозитория
@@ -552,12 +571,12 @@ class RepoInitializer(BaseCommand):
         # Создаем пустой файл Packages в каталоге репозитория
         with open(os.path.join(self._conf.repodirpath, 'Packages'), mode='w'):
             pass
-        logging.info(_('Succefully inited'))
+        logging.info(_('Successfully inited'))
 
 
 class BuildCmd(BaseCommand):
     cmd = 'build'
-    root_needed = True
+    root_required = True
     required_binaries = ['systemd-nspawn']
     (_BUILDED_PKGNAME,
      _BUILDED_PKGVERSION) = range(2)
@@ -670,7 +689,9 @@ class BuildCmd(BaseCommand):
                 dist_chroot.deploy(recreate=clean)
                 # Теперь выполняем копирование в chroot
                 try:
-                    logging.info(_('Copying sources for package to chroot {} ...').format(dist_chroot.name))
+                    full_pkgname = '{} = {}'.format(pkgname, version) if len(version) else pkgname
+                    logging.info(_('Copying sources for package {} to chroot {} ...').format(full_pkgname,
+                                                                                             dist_chroot.name))
                     dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
                     sources_list = dscfile.filelist + [os.path.basename(dscfilepath)]
                     # Абсолютное имя dsc файла пакета относительно корня chroot'а
@@ -1606,7 +1627,7 @@ class RepoRuntimeDepsAnalyzerCmd(_RepoAnalyzerCmd):
 
 class MakeDebianChrootCmd(BaseCommand):
     cmd = 'make-chroot'
-    root_needed = True
+    root_required = True
     required_binaries = ['debootstrap', 'systemd-nspawn']
 
     def run(self):
@@ -1620,6 +1641,18 @@ def make_default_subparser(main_parser, command):
                         default=Configuration.DEFAULT_CONF,
                         help=_('Buildrepo config path (default: {})').format(Configuration.DEFAULT_CONF))
     return parser
+
+
+class ChrootLoginCmd(BaseCommand):
+    cmd = 'login-chroot'
+    root_required = True
+    required_binaries = ['systemd-nspawn']
+
+    def run(self):
+        nsconainer = NSPContainer(self._conf)
+        if not nsconainer.deployed():
+            exit_with_error(_('Could not login to container {}: does not deployed').format(nsconainer.name))
+        nsconainer.login()
 
 
 def available_commands():
@@ -1644,8 +1677,8 @@ def register_atexit_callbacks():
         for root, dirs, files in os.walk(path, topdown=False):
             for directory in [os.path.join(root, d) for d in dirs]:
                 shutil.chown(directory, user, group)
-        for file in [os.path.join(root, f) for f in files]:
-            shutil.chown(file, user, group)
+            for file in [os.path.join(root, f) for f in files]:
+                shutil.chown(file, user, group)
 
     def remove_temp_directory_atexit_callback():
         for directory in tmpdirmanager.dirs():
@@ -1664,6 +1697,8 @@ def register_atexit_callbacks():
             logging.warning(_('Failed get group name for GID {}').format(sudo_gid))
             exit(0)
         conf = Configuration(args.config)
+        if not conf.repository_inited():
+            return
         for item in (os.path.join(conf.root, 'logs'),
                      os.path.join(conf.root, 'repo'),
                      conf.cachedirpath,
@@ -1672,7 +1707,8 @@ def register_atexit_callbacks():
         # Файлы логов
         for file in (os.path.join(conf.root, 'logs', conf.distro, 'chroot-{}.log'.format(conf.distro)),
                      os.path.join(conf.root, 'build-{}.log'.format(conf.reponame))):
-            shutil.chown(file, sudo_user, sudo_group)
+            if os.path.exists(file):
+                shutil.chown(file, sudo_user, sudo_group)
 
     import atexit
     atexit.register(remove_temp_directory_atexit_callback)
