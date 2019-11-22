@@ -97,6 +97,7 @@ class TemporaryDirManager:
         self.__dirs.append(directory)
         return directory
 
+
 tmpdirmanager = TemporaryDirManager()
 
 
