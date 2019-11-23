@@ -983,6 +983,52 @@ class RepositoryCache:
         return None
 
 
+class SourcesList:
+    (SL_PKGNAME,
+     SL_PKGVERSION) = range(2)
+
+    def __init__(self, conf):
+        self.__conf = conf
+        self.__build_list = []
+        sources_list_path = self.__conf.parser.get(BuildCmd.cmd, 'source-list', fallback=None)
+        if not sources_list_path:
+            exit_with_error(_('Source list does not specified in {}').format(self.__conf.conf_path))
+        sources_list_path = os.path.abspath(sources_list_path)
+        if not os.path.exists(sources_list_path):
+            exit_with_error(_('File {} does not exists').format(sources_list_path))
+        self.__sources_list_path = sources_list_path
+
+    def load(self):
+        logging.info(_('Loading source list from {} ...').format(self.__sources_list_path))
+        with open(self.__sources_list_path) as fp:
+            for line in fp.readlines():
+                line = line.strip()
+                if line.startswith('#') or not len(line):
+                    continue
+                tokens = line.split(' ')
+                if len(tokens) == 1:
+                    self.__build_list.append((line, ''))
+                elif len(tokens) == 2:
+                    self.__build_list.append((tokens[self.SL_PKGNAME], tokens[self.SL_PKGVERSION]))
+                else:
+                    logging.warning(_('Mailformed line {} in {}').format(line, self.__sources_list_path))
+                    continue
+        if not len(self.__build_list):
+            logging.warning(_('No one sources are found in {}').format(self.__sources_list_path))
+            exit(0)
+
+    @property
+    def build_list(self):
+        return self.__build_list
+
+    @property
+    def build_list_str(self):
+        return '\n'.join(p[self.SL_PKGNAME]
+                         if not len(p[self.SL_PKGVERSION]) else
+                         '{} = {}'.format(p[self.SL_PKGNAME], p[self.SL_PKGVERSION])
+                         for p in self.__build_list)
+
+
 class _RepoAnalyzerCmd(BaseCommand):
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
     alias = 'binary-repo'
@@ -1152,42 +1198,9 @@ class BuildCmd(BaseCommand):
 
     def __init__(self, conf_path):
         super().__init__(conf_path)
-        self.__build_list = []
         self.__distribution_info = ChrootDistributionInfo(self._conf)
-        self.__parse_source_list()
-
-    def __parse_source_list(self):
-        scenario_path = self._conf.parser.get(BuildCmd.cmd, 'source-list', fallback=None)
-        if not scenario_path:
-            exit_with_error(_('Source list does not specified in {}').format(self._conf.conf_path))
-        scenario_path = os.path.abspath(scenario_path)
-        if not os.path.exists(scenario_path):
-            exit_with_error(_('File {} does not exists').format(scenario_path))
-        scenario_path = os.path.abspath(scenario_path)
-        logging.info(_('Loading source list from {} ...').format(scenario_path))
-        with open(scenario_path) as fp:
-            for line in fp.readlines():
-                line = line.strip()
-                if line.startswith('#') or not len(line):
-                    continue
-                tokens = line.split(' ')
-                if len(tokens) == 1:
-                    self.__build_list.append((line, ''))
-                elif len(tokens) == 2:
-                    self.__build_list.append((tokens[self._BUILDED_PKGNAME], tokens[self._BUILDED_PKGVERSION]))
-                else:
-                    logging.warning(_('Mailformed line {} in {}').format(line, scenario_path))
-                    continue
-        if not len(self.__build_list):
-            logging.warning(_('No one sources are found in {}').format(scenario_path))
-            exit(0)
-        logging.info(_('Following packages are found in build list: \n{}').format(self.__builded_list_str()))
-
-    def __builded_list_str(self):
-        return '\n'.join([p[self._BUILDED_PKGNAME]
-                          if not len(p[self._BUILDED_PKGVERSION])
-                          else '{} = {}'.format(p[self._BUILDED_PKGNAME], p[self._BUILDED_PKGVERSION])
-                          for p in self.__build_list])
+        self.__sources_list = SourcesList(self._conf)
+        self.__sources_list.load()
 
     def __check_if_build_required(self, package, version, force_rebuild_list):
         # В зависимости от версии определяем набор исходников для сборки
@@ -1234,10 +1247,11 @@ class BuildCmd(BaseCommand):
 
     def __make_build(self, jobs, rebuild, clean):
         # Определяем факт наличия chroot'а
+        logging.info(_('Following packages are found in build list: \n{}').format(self.__sources_list.build_list_str))
         dist_chroot = NSPContainer(self._conf)
         if not dist_chroot.exists():
             exit_with_error(_('Chroot for {} does not created').format(dist_chroot.name))
-        for pkgname, version in self.__build_list:
+        for pkgname, version in self.__sources_list.build_list:
             need_building, dscfilepath = self.__check_if_build_required(pkgname, version, rebuild)
             if need_building:
                 # Обработка опции --clean: мы должны удалить распакованный образ
@@ -1277,8 +1291,8 @@ class BuildCmd(BaseCommand):
             if len(rebuild):
                 logging.warning(_('Package rebuilding {} ignored, '
                                   'because options --rebuild-all specified').format(', '.join(rebuild)))
-            rebuild = self.__build_list
-            logging.warning(_('Will be rebuilded following packages: {}').format(self.__builded_list_str()))
+            rebuild = self.__sources_list
+            logging.warning(_('Will be rebuilded following packages: {}').format(self.__sources_list.build_list_str))
         self.__make_build(jobs, rebuild, clean)
 
 
