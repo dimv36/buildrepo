@@ -933,7 +933,7 @@ class RepositoryCache:
     def __process_virtual_dependency(self, vdep):
         vpkgname, vdepver, vdepop = vdep
         for pkginfo in self.__packages:
-            pkgname, pkgver = pkginfo.get('package'), pkginfo.get('version')
+            pkgname, pkgver = pkginfo.get('package'), pkginfo.get('version', '')
             if pkgname == vpkgname:
                 if self.__check_dep(pkgver, vdepver, vdepop):
                     deptuple = (pkginfo.get('real_package'),
@@ -955,9 +955,6 @@ class RepositoryCache:
             pkgname, pkgver = pkginfo.get('package'), pkginfo.get('version')
             if pkgname == depname:
                 # Проверяем имя пакета и его версию
-                # NB: получаем корректную версию
-                pkgver = fix_debian_version(pkgver)
-                depver = fix_debian_version(pkgver)
                 is_virtual = pkginfo.get('virtual')
                 if is_virtual:
                     # Виртуальный?
@@ -966,6 +963,9 @@ class RepositoryCache:
                             pkginfo.get('op', ''),
                             pkginfo.get('version', ''))
                     return self.__process_virtual_dependency(vdep)
+                # NB: получаем корректную версию
+                pkgver = fix_debian_version(pkgver)
+                depver = fix_debian_version(pkgver)
                 if self.__check_dep(pkgver, depop, depver):
                     return (pkgname, pkgver), pkginfo.get('depends', [])
         return None
@@ -1084,18 +1084,18 @@ class _RepoAnalyzerCmd(BaseCommand):
 
         def print_items(deps):
             for dep, requirements in deps.items():
-                print(_('Package {}:').format(dep))
+                sys.stdout.write(_('Package {}:\n').format(dep))
                 for req in requirements:
-                    print('\t{}'.format(req))
+                    sys.stdout.write('\t{}\n'.format(req))
 
         unresolved_hash = sort_deps(all_unresolved)
-        print(_('***** Unresolved ***** :'))
+        sys.stdout.write(_('***** Unresolved ***** :\n'))
         print_items(unresolved_hash)
         in_dev_hash = sort_deps(all_in_dev)
-        print()
-        print(_('***** Found in dev: *****'))
+        sys.stdout.write('\n')
+        sys.stdout.write(_('***** Found in dev: *****\n'))
         print_items(in_dev_hash)
-        logging.info(_('Summary: unresolved: {}, deps in dev: {}').format(len(all_unresolved), len(all_in_dev)))
+        sys.stdout.write(_('Summary: unresolved: {}, deps in dev: {}\n').format(len(all_unresolved), len(all_in_dev)))
 
 
 class RepoInitializerCmd(BaseCommand):
@@ -1612,9 +1612,9 @@ class RepoRuntimeDepsAnalyzerCmd(_RepoAnalyzerCmd):
         for pkgname in self._builded_cache.packages:
             logging.info(_('Processing {} ...').format(pkgname))
             deps = self._get_depends_for_package(pkgname)
-            unresolve = [d for d in deps if d[0] == PackageType.PACKAGE_NOT_FOUND]
-            deps_in_dev = [d for d in deps if d[0] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
-                                                       PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
+            unresolve = [d for d in deps if d[DependencyFinder.DF_DEST] == PackageType.PACKAGE_NOT_FOUND]
+            deps_in_dev = [d for d in deps if d[DependencyFinder.DF_DEST] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
+                                                                              PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
             for dep in deps:
                 deptype, depstr, resolved, required_by = dep
                 if deptype == PackageType.PACKAGE_NOT_FOUND:
