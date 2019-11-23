@@ -144,7 +144,7 @@ class Configuration:
         tmpdirmanager.set_basedir(self.tmpdirpath)
         self._inited = True
 
-    def repository_inited(self):
+    def directories_created(self):
         dir_attrs = [attr for attr in dir(self) if attr.endswith('dirpath')]
         for attr in dir_attrs:
             val = getattr(self, attr)
@@ -528,7 +528,7 @@ class BaseCommand:
         if self.root_required and not os.getuid() == 0:
             exit_with_error(_('Must be run as superuser'))
         self.__check_required_binaries()
-        if not self.cmd == 'init' and not self._conf.repository_inited():
+        if not self.cmd == 'init' and not self._conf.directories_created():
             exit_with_error(_('Required directories not created. '
                               'Please, run `{} init` first.').format(sys.argv[0]))
 
@@ -1701,7 +1701,7 @@ def register_atexit_callbacks():
             logging.warning(_('Failed get group name for GID {}').format(sudo_gid))
             exit(0)
         conf = Configuration(args.config)
-        if not conf.repository_inited():
+        if not conf.directories_created():
             return
         for item in (os.path.join(conf.root, 'logs'),
                      os.path.join(conf.root, 'repo'),
