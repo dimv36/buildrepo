@@ -583,16 +583,49 @@ class DependencyFinder:
     def deps(self):
         return self.__deps
 
+    def __exec_exclude_filter(self, binaries, filter_list, func=None):
+        if not (self.__flags & DependencyFinder.FLAG_FINDER_MAIN):
+            return binaries
+        processed = []
+        for binary in binaries:
+            pkgname, *unused = binary
+            match = False
+            for exclude in filter_list:
+                if func(pkgname, exclude):
+                    match = True
+                    break
+            if not match:
+                processed.append(binary)
+        return processed
+
     def __recurse_deps(self, s, p):
         required_by = form_dependency(p)
-        *unused, deps = self.__rfcache.find_dependencies(p, required_by)
+        dest, *unused, deps, binaries = self.__rfcache.find_dependencies(p, required_by)
+        if dest == PackageType.PACKAGE_BUILDED:
+            assert binaries is not None, 'binaries not found'
+            if self.__flags & DependencyFinder.FLAG_FINDER_MAIN:
+                # Прокатываем exclude_rules -- отсекаем по имени
+                # пакеты, которые должны попасть на второй диск
+                filtered_binaries = self.__exec_exclude_filter(binaries,
+                                                               self.__exclude_rules,
+                                                               func=lambda x, y: x.endswith(y))
+                # Прокатываем black list
+                if len(self.__black_list):
+                    filtered_binaries = self.__exec_exclude_filter(filtered_binaries,
+                                                                   self.__black_list,
+                                                                   func=lambda x, y: x == y)
+                # Считаем эти бинари зависимостями на основной диск
+                for binary in filtered_binaries:
+                    dependency = [binary]
+                    if dependency not in deps:
+                        deps.append(dependency)
         for dep in deps:
             if len(dep) == 1:
                 dep = tuple(dep[0])
                 seen_item = (dep, required_by,)
                 if seen_item in self.__seendeps:
                     continue
-                depdest, pdstinfo, resolved, unused = self.__rfcache.find_dependencies(*seen_item)
+                depdest, pdstinfo, resolved, *unused = self.__rfcache.find_dependencies(*seen_item)
                 self.__seendeps.append(seen_item)
                 if depdest == PackageType.PACKAGE_NOT_FOUND:
                     i = (depdest, pdstinfo, resolved, required_by)
@@ -614,7 +647,7 @@ class DependencyFinder:
                     seen_item = (dpitem, required_by,)
                     if seen_item in self.__seendeps:
                         continue
-                    depdest, pdstinfo, resolved, unused = self.__rfcache.find_dependencies(*seen_item)
+                    depdest, pdstinfo, resolved, *unused = self.__rfcache.find_dependencies(*seen_item)
                     if depdest == PackageType.PACKAGE_NOT_FOUND:
                         i = (depdest, pdstinfo, resolved, required_by)
                         assert (len(i) == 4), (item, len(i))
@@ -773,6 +806,10 @@ class RepositoryFullCache:
     def builded_cache(self):
         return self._cache_by_type(PackageType.PACKAGE_BUILDED)[0]
 
+    def binaries_from_same_sources(self, dep):
+        build_cache = self.builded_cache
+        return build_cache.binaries_from_same_sources(dep)
+
     def find_dependencies(self, dep, required_by):
         # Note: Тип, строка зависимости, котеж имя-версия пакета, зависимости
         # или PackageType.PACKAGE_NOT_FOUND, depstr, None, None
@@ -785,14 +822,14 @@ class RepositoryFullCache:
         for c in self.__caches:
             depinfo = c.find_dependency(dep)
             if depinfo is not None:
-                resolved, deps = depinfo
+                resolved, deps, binaries = depinfo
                 logging.debug(_('Dependency {} resolved by {} = {} ({} repo)').format(
                     depstr, *resolved, c.name))
-                item = c.ctype, depstr, resolved, deps
+                item = c.ctype, depstr, resolved, deps, binaries
                 break
         if item is None:
             logging.debug(_('Dependency {} NOT FOUND').format(depstr))
-            item = PackageType.PACKAGE_NOT_FOUND, depstr, None, required_by
+            item = PackageType.PACKAGE_NOT_FOUND, depstr, None, required_by, None
         # Кэшируем результат
         self.__result_cache[dep] = item
         return item
@@ -977,8 +1014,23 @@ class RepositoryCache:
                 pkgver = fix_debian_version(pkgver)
                 depver = fix_debian_version(pkgver)
                 if self.__check_dep(pkgver, depop, depver):
-                    return (pkgname, pkgver), pkginfo.get('depends', [])
+                    source = pkginfo.get('source') or pkgname
+                    if source:
+                        binaries = self.binaries_for_source(source, pkginfo.get('version'))
+                    else:
+                        binaries = None
+                    return (pkgname, pkgver), pkginfo.get('depends', []), binaries
         return None
+
+    def binaries_for_source(self, source, version):
+        binaries = []
+        for pkginfo in self.__packages:
+            pkgsource, pkgver = pkginfo.get('source'), pkginfo.get('version')
+            if pkgsource == source and pkgver == version:
+                binaries.append((pkginfo.get('package'),
+                                 pkgver,
+                                 '='))
+        return binaries
 
     def source_package(self, binary_package, version):
         for pkginfo in self.__packages:
