@@ -746,6 +746,7 @@ class DebianIsoRepository:
 class RepositoryFullCache:
     def __init__(self, conf):
         self.__conf = conf
+        self.__result_cache = {}
         self.__caches = []
 
     def load(self):
@@ -776,16 +777,25 @@ class RepositoryFullCache:
         # Note: Тип, строка зависимости, котеж имя-версия пакета, зависимости
         # или PackageType.PACKAGE_NOT_FOUND, depstr, None, None
         depstr = form_dependency(dep)
+        item = None
         logging.debug(_('Finding dependency {} required by {} ...'.format(depstr, required_by)))
+        # Наивная проверка: пробуем кэш результатов
+        if dep in self.__result_cache:
+            return self.__result_cache.get(dep)
         for c in self.__caches:
             depinfo = c.find_dependency(dep)
             if depinfo is not None:
                 resolved, deps = depinfo
                 logging.debug(_('Dependency {} resolved by {} = {} ({} repo)').format(
                     depstr, *resolved, c.name))
-                return c.ctype, depstr, resolved, deps
-        logging.debug(_('Dependency {} NOT FOUND').format(depstr))
-        return PackageType.PACKAGE_NOT_FOUND, depstr, None, required_by
+                item = c.ctype, depstr, resolved, deps
+                break
+        if item is None:
+            logging.debug(_('Dependency {} NOT FOUND').format(depstr))
+            item = PackageType.PACKAGE_NOT_FOUND, depstr, None, required_by
+        # Кэшируем результат
+        self.__result_cache[dep] = item
+        return item
 
 
 class RepositoryCache:
@@ -999,7 +1009,7 @@ class SourcesList:
         self.__sources_list_path = sources_list_path
 
     def load(self):
-        logging.info(_('Loading source list from {} ...').format(self.__sources_list_path))
+        logging.info(_('Loading sources list from {} ...').format(self.__sources_list_path))
         with open(self.__sources_list_path) as fp:
             for line in fp.readlines():
                 line = line.strip()
@@ -1020,6 +1030,10 @@ class SourcesList:
     @property
     def build_list(self):
         return self.__build_list
+
+    @property
+    def path(self):
+        return self.__sources_list_path
 
     @property
     def build_list_str(self):
@@ -1087,7 +1101,7 @@ class _RepoAnalyzerCmd(BaseCommand):
                 exit_with_error(_('Intersection is found in lists'))
 
     def __build_cache_of_builded_packages(self):
-        logging.info(_('Build cache for builded packages ...'))
+        logging.info(_('Building cache for builded packages ...'))
         maker = MakePackageCacheCmd(self._conf.conf_path)
         maker.run(mount_path=self._conf.repodirpath,
                   name='builded',
@@ -1177,7 +1191,7 @@ class RepoInitializerCmd(BaseCommand):
 
 class BuildCmd(BaseCommand):
     cmd = 'build'
-    cmdhelp = _('Build packages from source list into distro chroot')
+    cmdhelp = _('Builds packages from source list into distro chroot')
     root_required = True
     required_binaries = ['systemd-nspawn']
     (_BUILDED_PKGNAME,
@@ -1298,7 +1312,7 @@ class BuildCmd(BaseCommand):
 
 class MakeRepoCmd(_RepoAnalyzerCmd):
     cmd = 'make-repo'
-    cmdhelp = _('Build repositories in reprepro format')
+    cmdhelp = _('Creates repositories (main, devel and source) in reprepro format')
     required_binaries = ['reprepro', 'xorrisofs']
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
 
@@ -1643,7 +1657,7 @@ class RepoRuntimeDepsAnalyzerCmd(_RepoAnalyzerCmd):
 
 class MakeDebianChrootCmd(BaseCommand):
     cmd = 'make-chroot'
-    cmdhelp = _('Create OS chroot for repository')
+    cmdhelp = _('Creates OS chroot for repository')
     root_required = True
     required_binaries = ['debootstrap', 'systemd-nspawn']
 
@@ -1653,6 +1667,8 @@ class MakeDebianChrootCmd(BaseCommand):
 
 
 class ChrootLoginCmd(BaseCommand):
+    import collections
+
     cmd = 'login-chroot'
     cmdhelp = _('Logins to deployed chroot')
     root_required = True
@@ -1663,6 +1679,105 @@ class ChrootLoginCmd(BaseCommand):
         if not nsconainer.deployed():
             exit_with_error(_('Could not login to container {}: does not deployed').format(nsconainer.name))
         nsconainer.login()
+
+
+class SourcesSortCmd(BaseCommand):
+    cmd = 'order-sources'
+    cmdhelp = _('Orders sources in specified sources.list via build-depends for building')
+
+    def __init__(self, conf_path):
+        super().__init__(conf_path)
+        self.__sources_list = SourcesList(self._conf)
+        self.__rfcache = RepositoryFullCache(self._conf)
+        self.__sources_list.load()
+        self.__rfcache.load()
+
+    def __sort_depends(self, must_be_sorted):
+        pass
+
+    def run(self, verbose=False):
+        sources_info = {}
+        for pkgname, pkgversion in self.__sources_list.build_list:
+            if len(pkgversion):
+                glob_re = '{}_{}.dsc'.format(pkgname, pkgversion)
+            else:
+                glob_re = '{}_*.dsc'.format(pkgname)
+            glob_re = os.path.join(self._conf.srcdirpath, glob_re)
+            source = glob.glob(glob_re)
+            if not len(source):
+                exit_with_error(_('Could not find source by regexp {}').format(glob_re))
+            source = source[0]
+            source_name = '{}-{}'.format(pkgname, pkgversion) if len(pkgversion) else pkgname
+            logging.info(_('Processing source {} ...').format(source_name))
+            dscpackage = apt.debfile.DscSrcPackage(filename=source)
+            m = re.match(r'.*_(?P<version>.*)\.dsc', source)
+            if not m:
+                exit_with_error(_('Failed determine source version of package {}').format(pkgname))
+            version = m.group('version')
+            deps_info = []
+            pkginfo = (pkgname, pkgversion, '=')
+            for dependency in dscpackage.depends:
+                if len(dependency):
+                    dependency = dependency[0]
+                    repotype, *unused = self.__rfcache.find_dependencies(dependency, pkginfo)
+                    if repotype in (PackageType.PACKAGE_BUILDED,
+                                    PackageType.PACKAGE_NOT_FOUND):
+                        deps_info.append(dependency[0])
+                else:
+                    for alt in dependency:
+                        repotype, *unused = self.__rfcache.find_dependencies(dependency, pkginfo)
+                        if repotype in (PackageType.PACKAGE_BUILDED,
+                                        PackageType.PACKAGE_NOT_FOUND):
+                            deps_info.append(alt[0])
+                            break
+            sources_info[(pkgname, pkgversion)] = {
+                'binaries': dscpackage.binaries,
+                'version': version,
+                'deps': deps_info
+            }
+        if verbose:
+            for package, info in sources_info.items():
+                sys.stdout.write(_('Package {}:\n').format(package))
+                for key, values in info.items():
+                    sys.stdout.write('\t{}: {}\n'.format(key, values))
+                sys.stdout.write('\n')
+        # Заносим туда все пакеты, которые не имеют зависимостей
+        have_not_any_depends = []
+        for key, info in sources_info.items():
+            if not len(info['deps']):
+                have_not_any_depends.append(key)
+        must_be_sorted = sorted(list(set(sources_info.keys() - have_not_any_depends)), key=lambda item: item[0])
+        sources_list_new = '{}.ordered'.format(self.__sources_list.path)
+        sources_list_new_fp = open(sources_list_new, mode='w')
+        sources_list_new_fp.write('# Those packages does not have build-depends from those repository:\n\n')
+        have_not_any_depends = sorted(have_not_any_depends, key=lambda item: item[0])
+        for pkgname, pkgver in have_not_any_depends:
+            sources_list_new_fp.write(pkgname)
+            if len(pkgver):
+                sources_list_new_fp.write(' ')
+                sources_list_new_fp.write(pkgver)
+            sources_list_new_fp.write('\n')
+        sources_list_new_fp.write('\n')
+        sort_index = len(have_not_any_depends)
+        have_not_any_depends += must_be_sorted
+        print(have_not_any_depends, sort_index, len(have_not_any_depends))
+        # Цикл на сортировку
+
+        def sort_sources(sources, sources_info, sort_index):
+            for i in range(sort_index + 1, len(sources)):
+                item_to_insert = sources[i]
+                print('item ins', item_to_insert)
+                j = i - 1
+                print('j', sources[j])
+                while j >= 0 and apt_pkg.check_dep(sources[j], '<', item_to_insert):
+                    sources[j + 1] = sources[j]
+                    j -= 1
+                sources[j + 1] = item_to_insert
+            return sources
+
+        print(sort_sources(have_not_any_depends, sources_info, sort_index))
+        sources_list_new_fp.close()
+        logging.info(_('Ordered sources list is saved to {}').format(sources_list_new))
 
 
 def make_default_subparser(main_parser, cls):
