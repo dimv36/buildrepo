@@ -13,7 +13,6 @@ import subprocess
 import datetime
 import configparser
 import contextlib
-import traceback
 import warnings
 
 # gettext
@@ -369,7 +368,6 @@ class NSPContainer:
                     tf.extractall()
                 shutil.move(self.__name, self.hostname)
             except Exception as e:
-                traceback.print_exc()
                 exit_with_error(_('Chroot deployment {} failed: {}').format(self.__name, e))
 
     def build_package(self, dsc_file_path, jobs):
@@ -478,7 +476,6 @@ class NSPContainer:
             chroot_main_env = os.path.join(dist_chroot_dir, 'srv', 'environment')
             with open(chroot_main_env, mode='w') as fp:
                 fp.write('export BUILDUSER="{}"\n'.format(build_user))
-                fp.write('export TERM="xterm-mono"\n')
             # Устанавливаем необходимые пакеты для сборки
             logging.info(_('Updating APT cache in chroot {} ...').format(self.__name))
             returncode = self._exec_nspawn(['apt-get', 'update'],
@@ -510,7 +507,6 @@ class NSPContainer:
                 logging.info(_('Moving chroot to {} ...').format(dst))
                 shutil.move(compressed_tar_path, dst)
         except Exception as e:
-            traceback.print_exc()
             exit_with_error(_('Chroot building failed: {}').format(e))
 
 
@@ -1325,7 +1321,6 @@ class BuildCmd(BaseCommand):
                     '{} = {}'.format(package, version) if len(version) else package))
             return (need_rebuild, dscfilepath)
         except Exception:
-            traceback.print_exc()
             exit_with_error(_('Failed to get binaries for {}').format(package))
 
     def __make_build(self, jobs, rebuild, clean):
@@ -1356,13 +1351,11 @@ class BuildCmd(BaseCommand):
                         logging.debug(_('Copying {} to {} ...').format(src, dst))
                         shutil.copy(src, dst)
                 except Exception:
-                    traceback.print_exc()
                     exit_with_error(_('Failed to determine sources of package {}').format(pkgname))
                 # Теперь производим сборку пакета в chroot'е
                 try:
                     dist_chroot.build_package(chroot_dsc_source, jobs)
                 except Exception as e:
-                    traceback.print_exc()
                     exit_with_error(e)
                 finally:
                     # Удаляем исходники из chroot'а
@@ -1503,7 +1496,6 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                     logging.debug(_('Copying {} to {}').format(f, dst))
                     shutil.copyfile(f, dst)
                 except Exception as e:
-                    traceback.print_exc()
                     exit_with_error(e)
         # Копируем исходники для разрешенных репозиториев
         # Обращаем ключи словаря
@@ -1755,13 +1747,19 @@ class ChrootLoginCmd(BaseCommand):
 
     cmd = 'login-chroot'
     cmdhelp = _('Logins to deployed chroot')
+    args = (
+        ('--deploy', {'required': False, 'action': 'store_true', 'default': False,
+                      'help': _('Deploy container instance if not exists, default: False')}),
+    )
     root_required = True
     required_binaries = ['systemd-nspawn']
 
-    def run(self):
+    def run(self, deploy=False):
         nsconainer = NSPContainer(self._conf)
-        if not nsconainer.deployed():
+        if not nsconainer.deployed() and not deploy:
             exit_with_error(_('Could not login to container {}: does not deployed').format(nsconainer.name))
+        else:
+            nsconainer.deploy()
         nsconainer.login()
 
 
