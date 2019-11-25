@@ -522,6 +522,7 @@ class BaseCommand:
     required_binaries = []
 
     def __init__(self, conf):
+        conf = os.path.abspath(conf)
         if not os.path.exists(os.path.dirname(conf)):
             os.makedirs(os.path.dirname(conf))
         self._conf = Configuration(conf)
@@ -1243,13 +1244,13 @@ class RepoInitializerCmd(BaseCommand):
                           self._conf.cachedirpath]:
             if os.path.exists(directory):
                 shutil.rmtree(directory)
-            logging.debug(_('Creating directory {} ...').format(directory))
+            logging.info(_('Creating directory {} ...').format(directory))
             os.makedirs(directory, exist_ok=True)
         for directory in [self._conf.chrootsdirpath,
                           self._conf.chrootsinstdirpath,
                           self._conf.tmpdirpath,
                           self._conf.isodirpath]:
-            logging.debug(_('Creating directory {} ...').format(directory))
+            logging.info(_('Creating directory {} ...').format(directory))
             os.makedirs(directory, exist_ok=True)
         # Создаем пустой файл Packages в каталоге репозитория
         with open(os.path.join(self._conf.repodirpath, 'Packages'), mode='w'):
