@@ -887,6 +887,8 @@ class RepositoryCache:
         return (sorted(p.get('package') for p in self.__packages if not p['virtual']))
 
     def create(self, packages_path):
+        version_fix_re = r'(?P<name>.*) (.*)'
+
         def process_line_buffer(line_buffer):
             pkginfo = {}
             keys = ['Package', 'Version', 'PreDepends', 'Depends', 'Provides']
@@ -903,6 +905,16 @@ class RepositoryCache:
                             value = apt_pkg.parse_depends(value)
                         pkginfo[key.lower()] = value
             pkginfo['virtual'] = False
+            # Фикс для имени исходного кода
+            # например, java-common (0.58)
+            if is_builded:
+                for key in ('package', 'source'):
+                    val = pkginfo.get(key, None)
+                    if val:
+                        m = re.match(version_fix_re, val)
+                        if m:
+                            val = m.group('name')
+                            pkginfo[key] = val
             full_pkginfo = []
             if 'provides' in pkginfo:
                 provides = pkginfo.get('provides')
@@ -1809,16 +1821,15 @@ class SourcesSortCmd(BaseCommand):
                     if item not in ordered_info:
                         ordered_info.append(item)
                     unordered.remove(new_source)
-                    unordered, ordered = self.__order_depends(ordered, unordered, new_source)
+                    ordered, unordered = self.__order_depends(ordered, unordered, new_source)
                 except ValueError:
-                    if new_source not in ordered_info:
-                        ordered_info.append(new_source)
+                    pass
         if source not in ordered_info:
             ordered_info.append(source)
         # Теперь формируем записи
         for order_item in ordered_info:
             ordered.append(order_item)
-        return unordered, ordered
+        return ordered, unordered
 
     def run(self, verbose=False):
         rfcache = RepositoryFullCache(self._conf)
@@ -1870,22 +1881,21 @@ class SourcesSortCmd(BaseCommand):
                 sys.stdout.write('\n')
         # Заносим туда все пакеты, которые не имеют зависимостей
         ordered = []
+        ordered.append(('# Those packages does not have build-depends from those repository:\n', ''))
         for key, info in self.__sources_info.items():
             if not len(info['deps']):
                 ordered.append(key)
         unordered = sorted(list(set(self.__sources_info.keys() - ordered)), key=lambda item: item[0])
-        sources_list_new = '{}.ordered'.format(self.__sources_list.path)
-        sources_list_new_fp = open(sources_list_new, mode='w')
-        sources_list_new_fp.write('# Those packages does not have build-depends from those repository:\n\n')
         while True:
             if not len(unordered):
                 break
             src = unordered.pop()
-            unorder, ordered = self.__order_depends(ordered, unordered, src)
-        for item in ordered:
-            sources_list_new_fp.write(self.__format_source(item))
-            sources_list_new_fp.write('\n')
-        sources_list_new_fp.close()
+            ordered, unordered = self.__order_depends(ordered, unordered, src)
+        sources_list_new = '{}.ordered'.format(self.__sources_list.path)
+        with open(sources_list_new, mode='w') as fp:
+            for item in ordered:
+                fp.write(self.__format_source(item))
+                fp.write('\n')
         logging.info(_('Ordered sources list is saved to {}').format(sources_list_new))
 
 
