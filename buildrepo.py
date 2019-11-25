@@ -879,6 +879,10 @@ class RepositoryCache:
         return self.__name
 
     @property
+    def pkginfo(self):
+        return self.__packages
+
+    @property
     def packages(self):
         return (sorted(p.get('package') for p in self.__packages if not p['virtual']))
 
@@ -1755,15 +1759,71 @@ class SourcesSortCmd(BaseCommand):
     def __init__(self, conf_path):
         super().__init__(conf_path)
         self.__sources_list = SourcesList(self._conf)
-        self.__rfcache = RepositoryFullCache(self._conf)
+        self.__sources_info = {}
+        self.__build_cache = None
         self.__sources_list.load()
-        self.__rfcache.load()
+        self.__build_cache_of_builded_packages()
 
-    def __sort_depends(self, must_be_sorted):
-        pass
+    def __build_cache_of_builded_packages(self):
+        logging.info(_('Building cache for builded packages ...'))
+        maker = MakePackageCacheCmd(self._conf.conf_path)
+        maker.run(mount_path=self._conf.repodirpath,
+                  name='builded',
+                  ctype=PackageType.PACKAGE_BUILDED,
+                  info_message=False)
+
+    def __format_source(self, source):
+        source_name, source_version = source
+        return '{} {}'.format(source_name, source_version) if len(source_version) else source_name
+
+    def __order_depends(self, ordered, unordered, source):
+        ordered_info = [('', '')]
+        for dep in self.__sources_info.get(source)['deps']:
+            # Ищем source по бинарной зависимости
+            source_name = None
+            for pkginfo in self.__build_cache.pkginfo:
+                pkgname = pkginfo.get('package')
+                if dep == pkgname:
+                    source_name = pkginfo.get('source', pkgname)
+                    break
+            if source_name is None:
+                exit_with_error(_('Failed to get source name for {}').format(dep))
+            in_ordered = source_name in [p[SourcesList.SL_PKGNAME] for p in ordered]
+            if in_ordered:
+                item = ('# {} (dep: {}) is needed for {}'.format(source_name, dep,
+                                                                 self.__format_source(source)), '')
+                if item not in ordered_info:
+                    ordered_info.append(item)
+            else:
+                # Ищем исходник пакета для разрешения зависимости
+                new_source = None
+                for key, value in self.__sources_info.items():
+                    pkgname, version = key
+                    if dep in value.get('binaries'):
+                        new_source = (pkgname, version)
+                        break
+                # Удаляем исходник из unordered и повторяем
+                try:
+                    item = ('# {} (dep: {}) is needed for {}'.format(new_source[0], dep,
+                                                                     self.__format_source(source)), '')
+                    if item not in ordered_info:
+                        ordered_info.append(item)
+                    unordered.remove(new_source)
+                    unordered, ordered = self.__order_depends(ordered, unordered, new_source)
+                except ValueError:
+                    if new_source not in ordered_info:
+                        ordered_info.append(new_source)
+        if source not in ordered_info:
+            ordered_info.append(source)
+        # Теперь формируем записи
+        for order_item in ordered_info:
+            ordered.append(order_item)
+        return unordered, ordered
 
     def run(self, verbose=False):
-        sources_info = {}
+        rfcache = RepositoryFullCache(self._conf)
+        rfcache.load()
+        self.__build_cache = rfcache.builded_cache
         for pkgname, pkgversion in self.__sources_list.build_list:
             if len(pkgversion):
                 glob_re = '{}_{}.dsc'.format(pkgname, pkgversion)
@@ -1774,7 +1834,7 @@ class SourcesSortCmd(BaseCommand):
             if not len(source):
                 exit_with_error(_('Could not find source by regexp {}').format(glob_re))
             source = source[0]
-            source_name = '{}-{}'.format(pkgname, pkgversion) if len(pkgversion) else pkgname
+            source_name = self.__format_source((pkgname, pkgversion))
             logging.info(_('Processing source {} ...').format(source_name))
             dscpackage = apt.debfile.DscSrcPackage(filename=source)
             m = re.match(r'.*_(?P<version>.*)\.dsc', source)
@@ -1786,63 +1846,45 @@ class SourcesSortCmd(BaseCommand):
             for dependency in dscpackage.depends:
                 if len(dependency):
                     dependency = dependency[0]
-                    repotype, *unused = self.__rfcache.find_dependencies(dependency, pkginfo)
+                    repotype, *unused = rfcache.find_dependencies(dependency, pkginfo)
                     if repotype in (PackageType.PACKAGE_BUILDED,
                                     PackageType.PACKAGE_NOT_FOUND):
                         deps_info.append(dependency[0])
                 else:
                     for alt in dependency:
-                        repotype, *unused = self.__rfcache.find_dependencies(dependency, pkginfo)
+                        repotype, *unused = rfcache.find_dependencies(dependency, pkginfo)
                         if repotype in (PackageType.PACKAGE_BUILDED,
                                         PackageType.PACKAGE_NOT_FOUND):
                             deps_info.append(alt[0])
                             break
-            sources_info[(pkgname, pkgversion)] = {
+            self.__sources_info[(pkgname, pkgversion)] = {
                 'binaries': dscpackage.binaries,
                 'version': version,
                 'deps': deps_info
             }
         if verbose:
-            for package, info in sources_info.items():
+            for package, info in self.__sources_info.items():
                 sys.stdout.write(_('Package {}:\n').format(package))
                 for key, values in info.items():
                     sys.stdout.write('\t{}: {}\n'.format(key, values))
                 sys.stdout.write('\n')
         # Заносим туда все пакеты, которые не имеют зависимостей
-        have_not_any_depends = []
-        for key, info in sources_info.items():
+        ordered = []
+        for key, info in self.__sources_info.items():
             if not len(info['deps']):
-                have_not_any_depends.append(key)
-        must_be_sorted = sorted(list(set(sources_info.keys() - have_not_any_depends)), key=lambda item: item[0])
+                ordered.append(key)
+        unordered = sorted(list(set(self.__sources_info.keys() - ordered)), key=lambda item: item[0])
         sources_list_new = '{}.ordered'.format(self.__sources_list.path)
         sources_list_new_fp = open(sources_list_new, mode='w')
         sources_list_new_fp.write('# Those packages does not have build-depends from those repository:\n\n')
-        have_not_any_depends = sorted(have_not_any_depends, key=lambda item: item[0])
-        for pkgname, pkgver in have_not_any_depends:
-            sources_list_new_fp.write(pkgname)
-            if len(pkgver):
-                sources_list_new_fp.write(' ')
-                sources_list_new_fp.write(pkgver)
+        while True:
+            if not len(unordered):
+                break
+            src = unordered.pop()
+            unorder, ordered = self.__order_depends(ordered, unordered, src)
+        for item in ordered:
+            sources_list_new_fp.write(self.__format_source(item))
             sources_list_new_fp.write('\n')
-        sources_list_new_fp.write('\n')
-        sort_index = len(have_not_any_depends)
-        have_not_any_depends += must_be_sorted
-        print(have_not_any_depends, sort_index, len(have_not_any_depends))
-        # Цикл на сортировку
-
-        def sort_sources(sources, sources_info, sort_index):
-            for i in range(sort_index + 1, len(sources)):
-                item_to_insert = sources[i]
-                print('item ins', item_to_insert)
-                j = i - 1
-                print('j', sources[j])
-                while j >= 0 and apt_pkg.check_dep(sources[j], '<', item_to_insert):
-                    sources[j + 1] = sources[j]
-                    j -= 1
-                sources[j + 1] = item_to_insert
-            return sources
-
-        print(sort_sources(have_not_any_depends, sources_info, sort_index))
         sources_list_new_fp.close()
         logging.info(_('Ordered sources list is saved to {}').format(sources_list_new))
 
