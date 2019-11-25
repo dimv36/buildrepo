@@ -1368,6 +1368,20 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
     required_binaries = ['reprepro', 'xorrisofs']
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
 
+    def __init__(self, conf_path):
+        super().__init__(conf_path)
+        sources_include = self._conf.parser.get(MakeRepoCmd.alias, 'source-include', fallback=[])
+        if isinstance(sources_include, str):
+            sources_include = sources_include.split(',')
+        sources = []
+        for source in sources_include:
+            abspath = os.path.abspath(source)
+            if os.path.exists(abspath):
+                sources.append(abspath)
+            else:
+                exit_with_error(_('File {} does not exists').format(abspath))
+        self.__sources_include = sources
+
     def __sources(self, pkg, version):
         # Определяем исходники по имени бинарного пакета и вресии
         source = self._builded_cache.source_package(pkg, version)
@@ -1513,7 +1527,8 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         chroot_script = self._conf.parser.get('chroot', 'chroot-script', fallback=None)
         if chroot_script:
             required_files.append(os.path.abspath(chroot_script))
-        # TODO: Поддержка дополнительных файлов
+        if len(self.__sources_include):
+            required_files += self.__sources_include
         for req in required_files:
             shutil.copyfile(req, os.path.join(sources_iso_tmpdir, os.path.basename(req)))
         now = datetime.datetime.now().strftime('%Y-%m-%d')
