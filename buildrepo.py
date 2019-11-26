@@ -298,6 +298,7 @@ class NSPContainer:
             logstream.write('\nTime: {}\n'.format(time.strftime('%H:%M:%S', time.gmtime(end.seconds))))
             logstream.close()
         else:
+            logging.debug('Executing {} ...'.format(' '.join(cmdargs)))
             proc = subprocess.Popen(cmdargs, universal_newlines=True)
             proc.communicate()
         return proc.returncode
@@ -307,7 +308,7 @@ class NSPContainer:
         if not nspawn_bin:
             exit_with_error(_('systemd-nspawn does not found'))
         nspawn_args = [nspawn_bin, '-D', container_path,
-                       '--hostname', self.__name, '-E', 'LC_ALL=C']
+                       '--hostname={}'.format(self.__name), '-E', 'LC_ALL=C']
         for src, dstinfo in self.bind_directories.items():
             dst, mode = dstinfo
             if mode == 'ro':
@@ -376,6 +377,7 @@ class NSPContainer:
         try:
             with open(os.path.join(self.deploypath, 'srv', 'runtime-environment'), mode='w') as fp:
                 fp.write('export DEB_BUILD_OPTIONS="nocheck parallel={}"\n'.format(jobs))
+                fp.write('export DEB_BUILD_PROFILES="nocheck parallel={}"\n'.format(jobs))
         except RuntimeError:
             raise RuntimeError(_('Runtime environment file generation failure'))
         # Файл создали, теперь формируем путь к логу
@@ -390,7 +392,7 @@ class NSPContainer:
         if returncode:
             raise RuntimeError(_('Package building {} failed').format(pname))
 
-    def login(self, bind=[]):
+    def login(self, boot=False, bind=[]):
         self.bind_directories
         for directory in bind:
             m = re.match(r'(?P<target>.*):(?P<dest>.*)', directory)
@@ -398,8 +400,12 @@ class NSPContainer:
                 logging.warning(_('Incorrect bind item: {}').format(directory))
                 continue
             self.__bind_directories[m.group('target')] = (m.group('dest'), 'rw')
-        if self._exec_nspawn(['/bin/bash'], self.deploypath, log_file=None):
-            raise RuntimeError(_('Failed to login to deployed container {}'.format(self.name)))
+        if boot:
+            nspawn_args = ['--boot', '--register=false']
+        else:
+            nspawn_args = ['/bin/bash']
+        returncode = self._exec_nspawn(nspawn_args, self.deploypath, log_file=None)
+        logging.info(_('Container {} finished with exit code {}').format(self.name, returncode))
 
     def create(self):
         def chroot_exclude_filter(tarinfo):
@@ -408,9 +414,9 @@ class NSPContainer:
             return tarinfo
 
         tmpdir = tmpdirmanager.create()
-        dist_chroot_dir = os.path.join(tmpdir, self.__name)
+        dist_chroot_dir = os.path.join(tmpdir, self.name)
         try:
-            logging.info(_('Running bootstrap for chroot {} ...').format(self.__name))
+            logging.info(_('Running bootstrap for chroot {} ...').format(self.name))
             debootstrap_bin = shutil.which('debootstrap')
             if not debootstrap_bin:
                 exit_with_error(_('Failed to find debootrap'))
@@ -425,7 +431,7 @@ class NSPContainer:
             if chroot_script:
                 debootstrap_args.append(chroot_script)
             # Формируем путь к лог-файлу для лога debootstrap
-            logpath = os.path.join(os.path.dirname(self.__conf.logsdirpath), 'chroot-{}.log'.format(self.__name))
+            logpath = os.path.join(os.path.dirname(self.__conf.logsdirpath), 'chroot-{}.log'.format(self.name))
             returncode = self._exec_command_log(debootstrap_args, logpath, recreate_log=True)
             if returncode:
                 raise RuntimeError(_('Debootstrap failed: {}').format(returncode))
@@ -447,11 +453,11 @@ class NSPContainer:
                         mirror_num += 1
                         os.makedirs(os.path.join(dist_chroot_dir, url))
                         apt_sources.write('deb file:///{url} {dist} {components}\n'.format(url=url,
-                                                                                           dist=self.__name,
+                                                                                           dist=self.name,
                                                                                            components=components))
                     else:
                         apt_sources.write('deb {url} {dist} {components}\n'.format(url=url,
-                                                                                   dist=self.__name,
+                                                                                   dist=self.name,
                                                                                    components=components))
             # Подготавливаем APT
             chroot_apt_conf = os.path.join(dist_chroot_dir, 'etc', 'apt', 'apt.conf.d', '1000-buildrepo.conf')
@@ -461,19 +467,25 @@ class NSPContainer:
                 apt_conf.write('APT::Get::Assume-Yes "true";\n')
                 apt_conf.write('Acquire::AllowInsecureRepositories "true";\n')
                 apt_conf.write('APT::Get::AllowUnauthenticated "true";\n')
+                apt_conf.write('Dir::Bin::Methods::ftp "ftp";\n')
             # Настраиваем /etc/hosts
             chroot_etc_hosts = os.path.join(dist_chroot_dir, 'etc', 'hosts')
             with open(chroot_etc_hosts, mode='w') as host_conf:
                 host_conf.write('127.0.0.1\tlocalhost\n')
-                host_conf.write('127.0.0.1\t{}\n'.format(self.__name))
+                host_conf.write('127.0.0.1\t{}\n'.format(self.name))
+            # Настраиваем /etc/hostname
+            chroot_etc_hostname = os.path.join(dist_chroot_dir, 'etc', 'hostname')
+            with open(chroot_etc_hostname, mode='w') as hostname_conf:
+                hostname_conf.write(self.name)
             # Создаем каталоги в chroot'е для сборки
             # Копируем скрипт сборки пакетов в chroot'е
             dst = os.path.join(dist_chroot_dir, 'srv', 'chroot-helper.sh')
             logging.info(_('Copy chroot helper script ...'))
             shutil.copy(self.__conf.chroot_helper, dst)
-            os.chmod(dst, 0o755)            # Создаем пользователя, от имени которого будем вести сборку
+            os.chmod(dst, 0o755)
+            # Создаем пользователя, от имени которого будем вести сборку
             build_user = self.__dist_info.get('build-user')
-            logging.info(_('Create user {} in chroot {} ...').format(build_user, self.__name))
+            logging.info(_('Create user {} in chroot {} ...').format(build_user, self.name))
             returncode = self._exec_nspawn(['/sbin/adduser', build_user,
                                             '--disabled-password', '--gecos', 'chroot-builder'],
                                            dist_chroot_dir, logpath)
@@ -484,12 +496,12 @@ class NSPContainer:
             with open(chroot_main_env, mode='w') as fp:
                 fp.write('export BUILDUSER="{}"\n'.format(build_user))
             # Устанавливаем необходимые пакеты для сборки
-            logging.info(_('Updating APT cache in chroot {} ...').format(self.__name))
+            logging.info(_('Updating APT cache in chroot {} ...').format(self.name))
             returncode = self._exec_nspawn(['apt-get', 'update'],
                                            dist_chroot_dir, logpath)
             if returncode:
                 raise RuntimeError(_('APT cache update failed'))
-            logging.info(_('Installing required packages in chroot {} ...').format(self.__name))
+            logging.info(_('Installing required packages in chroot {} ...').format(self.name))
             returncode = self._exec_nspawn(['apt-get', 'install'] + self.CHROOT_REQUIRED_DEBS,
                                            dist_chroot_dir, logpath)
             if returncode:
@@ -502,15 +514,40 @@ class NSPContainer:
                                                dist_chroot_dir, logpath)
                 if returncode:
                     raise RuntimeError(_('User selected packages installation in chroot failed'))
+            try:
+                # Удаляем /etc/securetty - файл, определяющий "безопасные" TTY для логина
+                # Это необходимо для запуска контейнера в режиме boot, поскольку мы не знаем TTY
+                # процесса systemd-nspawn
+                os.remove(os.path.join(dist_chroot_dir, 'etc', 'securetty'))
+            except Exception:
+                pass
+            root_paswd_hash = self.__conf.parser.get('chroot', 'root-pwd-hash', fallback=None)
+            if root_paswd_hash:
+                # Создаем скрипт для назначения пароля по хэшу
+                try:
+                    logging.info(_('Setting password hash for user root in chroot {} ...').format(self.name))
+                    root_pwd_setter_path = os.path.join('/srv', 'chpasswd.sh')
+                    root_pwd_setter_full_path = os.path.join(dist_chroot_dir, 'srv', 'chpasswd.sh')
+                    with open(root_pwd_setter_full_path, mode='w') as fp:
+                        fp.write('#!/bin/bash\n\n')
+                        fp.write('echo \'root:{}\' | chpasswd -e'.format(root_paswd_hash))
+                    os.chmod(root_pwd_setter_full_path, 0o755)
+                    returncode = self._exec_nspawn([root_pwd_setter_path], dist_chroot_dir, logpath)
+                    if returncode:
+                        raise RuntimeError(_('chpasswd returns {}').format(returncode))
+                    # Теперь этот файл можем удалить
+                    os.remove(root_pwd_setter_full_path)
+                except Exception as e:
+                    logging.warning(_('Setting password for root in chroot failed: {}').format(e))
             # Создаем архив из chroot'а
             with change_directory(tmpdir):
-                compressed_tar_path = os.path.join(tmpdir, '{}.tar.{}'.format(self.__name, self.CHROOT_COMPRESSION))
-                logging.info(_('Creating archive with chroot {} ...').format(self.__name))
+                compressed_tar_path = os.path.join(tmpdir, '{}.tar.{}'.format(self.name, self.CHROOT_COMPRESSION))
+                logging.info(_('Creating archive with chroot {} ...').format(self.name))
                 with self.tarfile.open(compressed_tar_path,
                                        mode='w:{}'.format(self.CHROOT_COMPRESSION)) as tf:
-                    tf.add(self.__name, filter=chroot_exclude_filter)
+                    tf.add(self.name, filter=chroot_exclude_filter)
                 # Move to chroot storage
-                dst = os.path.join(self.__conf.chrootsdirpath, '{}.tar.{}'.format(self.__name, self.CHROOT_COMPRESSION))
+                dst = os.path.join(self.__conf.chrootsdirpath, '{}.tar.{}'.format(self.name, self.CHROOT_COMPRESSION))
                 logging.info(_('Moving chroot to {} ...').format(dst))
                 shutil.move(compressed_tar_path, dst)
         except Exception as e:
@@ -1757,20 +1794,23 @@ class ChrootLoginCmd(BaseCommand):
     args = (
         ('--deploy', {'required': False, 'action': 'store_true', 'default': False,
                       'help': _('Deploy container instance if not exists, default: False')}),
+        ('--boot', {'required': False, 'action': 'store_true', 'default': False,
+                    'help': _('Run container with boot mode, default: False')}),
         ('--bind', {'required': False, 'nargs': '+', 'default': [],
                     'help': _('Additionally mounted directories for chroot (in systemd-nspawn format)')}),
     )
     root_required = True
     required_binaries = ['systemd-nspawn']
 
-    def run(self, deploy=False, bind=[]):
+    def run(self, boot, deploy, bind):
         nsconainer = NSPContainer(self._conf)
-        if not nsconainer.deployed() and not deploy:
-            exit_with_error(_('Could not login to container {}: does not deployed').format(nsconainer.name))
-        else:
-            nsconainer.deploy()
+        if not nsconainer.deployed():
+            if deploy:
+                nsconainer.deploy()
+            else:
+                exit_with_error(_('Could not login to container {}: does not deployed').format(nsconainer.name))
         try:
-            nsconainer.login(bind)
+            nsconainer.login(boot, bind)
         except Exception as e:
             exit_with_error(e)
 
