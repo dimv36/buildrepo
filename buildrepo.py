@@ -390,7 +390,14 @@ class NSPContainer:
         if returncode:
             raise RuntimeError(_('Package building {} failed').format(pname))
 
-    def login(self):
+    def login(self, bind=[]):
+        self.bind_directories
+        for directory in bind:
+            m = re.match(r'(?P<target>.*):(?P<dest>.*)', directory)
+            if not m:
+                logging.warning(_('Incorrect bind item: {}').format(directory))
+                continue
+            self.__bind_directories[m.group('target')] = (m.group('dest'), 'rw')
         if self._exec_nspawn(['/bin/bash'], self.deploypath, log_file=None):
             raise RuntimeError(_('Failed to login to deployed container {}'.format(self.name)))
 
@@ -1313,7 +1320,7 @@ class BuildCmd(BaseCommand):
                 if not len(glob.glob(deb_re)):
                     need_rebuild = True
                     missing_binaries += 1
-            # Если бинарников меньше, чем в dsc, то выводим предупореждение
+            # Если бинарников меньше, чем в dsc, то выводим предупреждение
             if need_rebuild and not len(dscfile.binaries) == missing_binaries:
                 logging.info(_('Source package {} will be rebuilded due to missing binaries').format(package))
             elif not need_rebuild:
@@ -1750,17 +1757,22 @@ class ChrootLoginCmd(BaseCommand):
     args = (
         ('--deploy', {'required': False, 'action': 'store_true', 'default': False,
                       'help': _('Deploy container instance if not exists, default: False')}),
+        ('--bind', {'required': False, 'nargs': '+', 'default': [],
+                    'help': _('Additionally mounted directories for chroot (in systemd-nspawn format)')}),
     )
     root_required = True
     required_binaries = ['systemd-nspawn']
 
-    def run(self, deploy=False):
+    def run(self, deploy=False, bind=[]):
         nsconainer = NSPContainer(self._conf)
         if not nsconainer.deployed() and not deploy:
             exit_with_error(_('Could not login to container {}: does not deployed').format(nsconainer.name))
         else:
             nsconainer.deploy()
-        nsconainer.login()
+        try:
+            nsconainer.login(bind)
+        except Exception as e:
+            exit_with_error(e)
 
 
 class SourcesSortCmd(BaseCommand):
