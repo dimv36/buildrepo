@@ -599,16 +599,47 @@ class PackageType:
      PACKAGE_FROM_OS_DEV_REPO,
      PACKAGE_FROM_EXT_DEV_REPO,
      PACKAGE_NOT_FOUND) = range(0, 6)
+    _CREATED_MAP = None
+    _FULL_MAP = None
 
     @classmethod
     def available_types(cls):
         for obj in filter(lambda x: x.startswith('PACKAGE'), dir(cls)):
             yield getattr(cls, obj)
 
+    @classmethod
+    def _cache_type_map(cls, full=False):
+        ret = {}
+        for attr in ['PACKAGE_FROM_OS_REPO',
+                     'PACKAGE_FROM_EXT_REPO',
+                     'PACKAGE_FROM_OS_DEV_REPO',
+                     'PACKAGE_FROM_EXT_DEV_REPO']:
+            attrval = getattr(cls, attr)
+            m = re.match(r'PACKAGE_FROM_(?P<type>.*)_REPO', attr)
+            attrkey = m.group('type').lower().replace('_', '-')
+            ret[attrkey] = attrval
+        if full:
+            ret['builded'] = cls.PACKAGE_BUILDED
+            ret['not found'] = cls.PACKAGE_NOT_FOUND
+        return ret
+
+    @classmethod
+    def cache_type_created_map(cls):
+        if not cls._CREATED_MAP:
+            cls._CREATED_MAP = cls._cache_type_map(full=False)
+        return cls._CREATED_MAP
+
+    @classmethod
+    def cache_type_full_map(cls):
+        if not cls._FULL_MAP:
+            cls._FULL_MAP = cls._cache_type_map(full=True)
+        return cls._FULL_MAP
+
 
 class DependencyFinder:
     FLAG_FINDER_MAIN = 1 << 0
     FLAG_FINDER_DEV = 1 << 1
+    FLAG_FINDER_FIRST_LEVEL = 1 << 2
     (DF_DEST,
      DF_PKGINFO,
      DF_RESOLVED,
@@ -686,7 +717,8 @@ class DependencyFinder:
                     if item not in s:
                         assert (len(item) == 4), (item, len(item))
                         s.append(item)
-                        self.__recurse_deps(s, dep)
+                        if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
+                            self.__recurse_deps(s, dep)
             else:
                 # Альтернативная зависимость
                 item = None
@@ -707,7 +739,8 @@ class DependencyFinder:
                         if item not in s:
                             assert (len(item) == 4), (item, len(item))
                             s.append(item)
-                            self.__recurse_deps(s, dpitem)
+                            if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
+                                self.__recurse_deps(s, dpitem)
                         break
                 if self.__flags & DependencyFinder.FLAG_FINDER_MAIN and not item:
                     alt_dep_full = ' | '.join(form_dependency(d) for d in dep)
@@ -719,7 +752,8 @@ class DependencyFinder:
                     if item not in s:
                         assert (len(item) == 4), (item, len(item))
                         s.append(item)
-                        self.__recurse_deps(s, last_alt_dep)
+                        if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
+                            self.__recurse_deps(s, last_alt_dep)
 
     def __find_dep(self, pkgname):
         def sortversions(versions):
@@ -1206,10 +1240,12 @@ class _RepoAnalyzerCmd(BaseCommand):
     def _emit_deps_summary(self, all_unresolved, all_in_dev):
         def sort_deps(deps):
             res = {}
+            deptype_full_map = PackageType.cache_type_full_map()
+            deptype_full_map = dict(map(reversed, deptype_full_map.items()))
             for dep_info in deps:
-                unused, dependency, unused2, required_by = dep_info
+                depdest, dependency, unused2, required_by = dep_info
                 req_values = res.get(required_by, [])
-                req_values.append(dependency)
+                req_values.append((dependency, deptype_full_map.get(depdest)))
                 req_values = sorted(list(set(req_values)))
                 res[required_by] = req_values
             return res
@@ -1218,7 +1254,8 @@ class _RepoAnalyzerCmd(BaseCommand):
             for dep, requirements in deps.items():
                 sys.stdout.write(_('Package {}:\n').format(dep))
                 for req in requirements:
-                    sys.stdout.write('\t{}\n'.format(req))
+                    dep, depdeststr = req
+                    sys.stdout.write(_('\t{}\t\t({} repo)\n').format(dep, depdeststr))
 
         unresolved_hash = sort_deps(all_unresolved)
         sys.stdout.write(_('***** Unresolved ***** :\n'))
@@ -1616,23 +1653,17 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
 
 
 class MakePackageCacheCmd(BaseCommand):
-    CacheMapped = {
-        'os': PackageType.PACKAGE_FROM_OS_REPO,
-        'os-dev': PackageType.PACKAGE_FROM_OS_DEV_REPO,
-        'ext': PackageType.PACKAGE_FROM_EXT_REPO,
-        'ext-dev': PackageType.PACKAGE_FROM_EXT_DEV_REPO
-    }
     cmd = 'make-package-cache'
     cmdhelp = _('Creates repository cache for dependency resolving')
     args = (
         ('--mount-path', {'required': True, 'help': _('Set path to repo\'s mount point')}),
         ('--name', {'required': True, 'help': _('Set package name of repo')}),
-        ('--type', {'dest': 'ctype', 'required': True, 'choices': CacheMapped})
+        ('--type', {'dest': 'ctype', 'required': True, 'choices': PackageType.cache_type_created_map()})
     )
 
     def run(self, mount_path, name, ctype, info_message=True):
         if isinstance(ctype, str):
-            ctype = self.CacheMapped.get(ctype)
+            ctype = PackageType.cache_type_created_map().get(ctype)
         is_builded = (ctype == PackageType.PACKAGE_BUILDED)
         if not is_builded:
             packages_path = []
@@ -1792,7 +1823,7 @@ class RepoRuntimeDepsAnalyzerCmd(_RepoAnalyzerCmd):
         all_in_dev = []
         for pkgname in self._builded_cache.packages:
             logging.info(_('Processing {} ...').format(pkgname))
-            deps = self._get_depends_for_package(pkgname)
+            deps = self._get_depends_for_package(pkgname, flags=DependencyFinder.FLAG_FINDER_FIRST_LEVEL)
             unresolve = [d for d in deps if d[DependencyFinder.DF_DEST] == PackageType.PACKAGE_NOT_FOUND]
             deps_in_dev = [d for d in deps if d[DependencyFinder.DF_DEST] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
                                                                               PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
