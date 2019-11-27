@@ -801,7 +801,7 @@ class DebianIsoRepository:
                 if not run_command_log([self.__reprepro_bin, 'includedeb',
                                         self.__name, package]):
                     exit_with_error(_('Including binaries to repo failure'))
-            # Удаление ненужных директорий
+            # Удаление ненужных каталогов
             for directory in ['db', 'conf']:
                 shutil.rmtree(directory)
         now = datetime.datetime.now().strftime('%Y-%m-%d')
@@ -1279,10 +1279,8 @@ class RepoInitializerCmd(BaseCommand):
     """
 
     def run(self, force):
-        """
-        Создает директории в корневой директории
-        """
-        # Проверяем факт наличия директорий и говорим, что требуется ключ force
+        # Проверяем факт наличия каталогов репозитория и говорим, что требуется ключ force
+        # (при force=False)
         repository_dirs = [self._conf.srcdirpath, self._conf.repodirpath,
                            self._conf.logsdirpath, self._conf.cachedirpath]
         if not force:
