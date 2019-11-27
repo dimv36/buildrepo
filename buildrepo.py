@@ -1270,18 +1270,30 @@ class _RepoAnalyzerCmd(BaseCommand):
 class RepoInitializerCmd(BaseCommand):
     cmd = 'init'
     cmdhelp = _('Initializes directories used for building')
+    args = (
+        ('--force', {'required': False, 'action': 'store_true', 'default': False,
+                     'help': _('Reinitialize directories forces')}),
+    )
     """
     Класс выполняет подготовку при инициализации репозитория
     """
 
-    def run(self):
+    def run(self, force):
         """
         Создает директории в корневой директории
         """
-        for directory in [self._conf.srcdirpath,
-                          self._conf.repodirpath,
-                          self._conf.logsdirpath,
-                          self._conf.cachedirpath]:
+        # Проверяем факт наличия директорий и говорим, что требуется ключ force
+        repository_dirs = [self._conf.srcdirpath, self._conf.repodirpath,
+                           self._conf.logsdirpath, self._conf.cachedirpath]
+        if not force:
+            existed = []
+            for directory in repository_dirs:
+                if os.path.exists(directory) and os.path.isdir(directory):
+                    existed.append(directory)
+            if len(existed):
+                exit_with_error(_('Directories {} already exists. '
+                                  'Use `--force` for reinitializing').format(', '.join(existed)))
+        for directory in repository_dirs:
             if os.path.exists(directory):
                 shutil.rmtree(directory)
             logging.info(_('Creating directory {} ...').format(directory))
