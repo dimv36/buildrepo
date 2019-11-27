@@ -1649,6 +1649,8 @@ class RemoveSourceCmd(BaseCommand):
     cmdhelp = _('Removes sources and binaries from repository')
     args = (
         ('--package', {'required': True, 'help': _('Source package name to be removed')}),
+        ('--remove-orig', {'required': False, 'help': _('Remove *.orig.* source, default: False'),
+                           'action': 'store_true', 'default': False})
     )
 
     def __process_line_buffer(self, line_buffer):
@@ -1668,7 +1670,7 @@ class RemoveSourceCmd(BaseCommand):
                 pkginfo[last_processing] = value
         return pkginfo
 
-    def run(self, package):
+    def run(self, package, remove_orig):
         expr = os.path.join(self._conf.srcdirpath, '{}_*.dsc'.format(package))
         sources = glob.glob(expr)
         if not len(sources):
@@ -1694,6 +1696,16 @@ class RemoveSourceCmd(BaseCommand):
         dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
         sources_to_remove = [dscfilepath] + [os.path.join(self._conf.srcdirpath, source)
                                              for source in dscfile.filelist]
+        if not remove_orig:
+            orig_idx = None
+            for i in range(0, len(sources_to_remove)):
+                source = sources_to_remove[i]
+                if re.match(r'.*.orig.*', source):
+                    orig_idx = i
+                    break
+            if orig_idx:
+                item = sources_to_remove[orig_idx]
+                sources_to_remove.remove(item)
         packages_path = os.path.join(self._conf.repodirpath, 'Packages')
         packages_info = []
         try:
