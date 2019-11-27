@@ -614,20 +614,23 @@ class DependencyFinder:
      DF_RESOLVED,
      DF_REQUIRED) = range(4)
 
-    def __init__(self, pkgname, rfcache, conf,
-                 exclude_rules=None, black_list=[], flags=FLAG_FINDER_MAIN):
+    def __init__(self, conf, rfcache):
         self.__deps = []
         self.__rfcache = rfcache
+        self.__conf = conf
+        self.__exclude_rules = None
+        self.__black_list = None
+        self.__flags = self.FLAG_FINDER_MAIN
+        self.__seendeps = []
+
+    def process(self, pkgname, exclude_rules=None,
+                black_list=None, flags=FLAG_FINDER_MAIN):
+        self.__deps.clear()
         self.__exclude_rules = exclude_rules
         self.__black_list = black_list
-        self.__conf = conf
         self.__flags = flags
-        self.__seendeps = []
         pkg_deps_info = self.__find_dep(pkgname)
         self.__recurse_deps(self.__deps, pkg_deps_info)
-
-    @property
-    def deps(self):
         return self.__deps
 
     def __exec_exclude_filter(self, binaries, filter_list, func=None):
@@ -1167,6 +1170,7 @@ class _RepoAnalyzerCmd(BaseCommand):
         self._rfcache = RepositoryFullCache(self._conf)
         self.__build_cache_of_builded_packages()
         self._rfcache.load()
+        self._depfinder = DependencyFinder(self._conf, self._rfcache)
         self._builded_cache = self._rfcache.builded_cache
 
     def __build_cache_of_builded_packages(self):
@@ -1179,11 +1183,10 @@ class _RepoAnalyzerCmd(BaseCommand):
 
     def _get_depends_for_package(self, package, exclude_rules=None,
                                  black_list=None, flags=DependencyFinder.FLAG_FINDER_MAIN):
-        depfinder = DependencyFinder(package,
-                                     self._rfcache,
-                                     self._conf,
-                                     exclude_rules, black_list, flags)
-        return depfinder.deps
+        return self._depfinder.process(package,
+                                       exclude_rules,
+                                       black_list,
+                                       flags)
 
     def _emit_unresolved(self, unresolve, exit=True):
         for p in unresolve:
