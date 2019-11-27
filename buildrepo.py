@@ -77,14 +77,17 @@ class TemporaryDirManager:
             cls._instance = object.__new__(cls)
         return cls._instance
 
+    @classmethod
+    def instance(cls):
+        assert cls._instance is not None, '{} is not inited'.format(cls.__name__)
+        return cls._instance
+
     def __init__(self, prefix='buildrepo', basedir=None):
         self.__dirs = []
         self.__prefix = prefix
         self.__basedir = basedir
 
-    def set_basedir(self, basedir):
-        self.__basedir = basedir
-
+    @property
     def dirs(self):
         return self.__dirs
 
@@ -93,9 +96,6 @@ class TemporaryDirManager:
         os.makedirs(directory, exist_ok=True)
         self.__dirs.append(directory)
         return directory
-
-
-tmpdirmanager = TemporaryDirManager()
 
 
 class Configuration:
@@ -110,6 +110,11 @@ class Configuration:
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
             cls._instance = object.__new__(cls)
+        return cls._instance
+
+    @classmethod
+    def instance(cls):
+        assert cls._instance is not None, '{} is not inited'.format(cls.__name__)
         return cls._instance
 
     def __init__(self, conf_path):
@@ -140,7 +145,8 @@ class Configuration:
         for subdir in ['chroots', 'chrootsinst', 'tmp', 'iso']:
             setattr(self, '{}dirpath'.format(subdir), os.path.join(self.root, subdir))
         self.__init_logger()
-        tmpdirmanager.set_basedir(self.tmpdirpath)
+        # Инициализируем менеджер временных директорий
+        TemporaryDirManager(basedir=self.tmpdirpath)
         self._inited = True
 
     def directories_created(self):
@@ -181,8 +187,8 @@ class Configuration:
 class ChrootDistributionInfo(dict):
     CHROOT_BUILDER_DEFAULT = 'builder'
 
-    def __init__(self, conf):
-        self.__parse_conf(conf)
+    def __init__(self):
+        self.__parse_conf()
 
     def __to_list(self, arg):
         if isinstance(arg, list):
@@ -206,26 +212,25 @@ class ChrootDistributionInfo(dict):
                     logging.warning(_('Mirror with schema {} does not supported').format(schema))
         return good_mirrors
 
-    def __parse_conf(self, conf):
-        dists_parser = configparser.ConfigParser()
-        dists_parser.read(conf.conf_path)
+    def __parse_conf(self):
+        conf = Configuration.instance()
         items = {}
         mirrors = []
-        for opt_name in sorted(dists_parser.options('chroot')):
+        for opt_name in sorted(conf.parser.options('chroot')):
             if re.match(r'mirror\d+', opt_name):
-                mirrors.append(dists_parser.get('chroot', opt_name, fallback=''))
+                mirrors.append(conf.parser.get('chroot', opt_name, fallback=''))
             elif opt_name == 'chroot-script':
-                chroot_script = dists_parser.get('chroot', opt_name, fallback=None)
+                chroot_script = conf.parser.get('chroot', opt_name, fallback=None)
                 if chroot_script:
                     chroot_script = os.path.abspath(chroot_script)
                 items[opt_name] = chroot_script
             elif opt_name in ('components', 'debs'):
-                val = self.__to_list(dists_parser.get('chroot', opt_name, fallback=[]))
+                val = self.__to_list(conf.parser.get('chroot', opt_name, fallback=[]))
                 items[opt_name] = val
             elif opt_name == 'build-user':
-                items[opt_name] = dists_parser.get('chroot', opt_name, fallback=None)
+                items[opt_name] = conf.parser.get('chroot', opt_name, fallback=None)
             elif opt_name == 'distro':
-                items[opt_name] = dists_parser.get('chroot', opt_name, fallback=None)
+                items[opt_name] = conf.parser.get('chroot', opt_name, fallback=None)
         mirrors = self.__parse_mirrors(mirrors)
         if len(mirrors):
             items['mirrors'] = mirrors
@@ -253,10 +258,10 @@ class NSPContainer:
             data = self._ansi_escape.sub('', data)
             return super().write(data.encode('utf-8', errors='ignore'))
 
-    def __init__(self, conf):
-        self.__conf = conf
+    def __init__(self):
+        self.__conf = Configuration.instance()
         self.__bind_directories = None
-        self.__dist_info = ChrootDistributionInfo(self.__conf)
+        self.__dist_info = ChrootDistributionInfo()
         self.__name = self.__dist_info.get('distro')
 
     @property
@@ -415,7 +420,7 @@ class NSPContainer:
                 return None
             return tarinfo
 
-        tmpdir = tmpdirmanager.create()
+        tmpdir = TemporaryDirManager.instance().create()
         dist_chroot_dir = os.path.join(tmpdir, self.name)
         try:
             logging.info(_('Running bootstrap for chroot {} ...').format(self.name))
@@ -556,42 +561,6 @@ class NSPContainer:
             exit_with_error(_('Chroot building failed: {}').format(e))
 
 
-class BaseCommand:
-    cmd = None
-    cmdhelp = None
-    alias = None
-    root_required = False
-    required_binaries = []
-
-    def __init__(self, conf):
-        env_conf = os.environ.get('BUILDREPO_CONF')
-        if env_conf:
-            conf_path = os.path.abspath(env_conf)
-        else:
-            conf_path = os.path.abspath(conf)
-        if not os.path.exists(os.path.dirname(conf_path)):
-            os.makedirs(os.path.dirname(conf_path))
-        self._conf = Configuration(conf_path)
-        if self.root_required and not os.getuid() == 0:
-            exit_with_error(_('Must be run as superuser'))
-        self.__check_required_binaries()
-        if not self.cmd == 'init' and not self._conf.directories_created():
-            exit_with_error(_('Required directories not created. '
-                              'Please, run `{} init` first.').format(sys.argv[0]))
-
-    def __check_required_binaries(self):
-        missing_binaries = []
-        for binary in self.required_binaries:
-            if shutil.which(binary) is None:
-                missing_binaries.append(binary)
-        if len(missing_binaries):
-            logging.warning(_('Missing binaries on host: {}').format(', '.join(missing_binaries)))
-            logging.warning(_('Some steps of current command may failed'))
-
-    def run(self):
-        raise NotImplementedError()
-
-
 class PackageType:
     (PACKAGE_BUILDED,
      PACKAGE_FROM_OS_REPO,
@@ -645,10 +614,10 @@ class DependencyFinder:
      DF_RESOLVED,
      DF_REQUIRED) = range(4)
 
-    def __init__(self, conf, rfcache):
+    def __init__(self, rfcache):
         self.__deps = []
         self.__rfcache = rfcache
-        self.__conf = conf
+        self.__conf = Configuration.instance()
         self.__exclude_rules = None
         self.__black_list = None
         self.__flags = self.FLAG_FINDER_MAIN
@@ -793,8 +762,8 @@ class DependencyFinder:
 class DebianIsoRepository:
     import platform
 
-    def __init__(self, conf, tmpdir, is_dev):
-        self.__conf = conf
+    def __init__(self, tmpdir, is_dev):
+        self.__conf = Configuration.instance()
         self.__is_dev = is_dev
         repotype = 'main' if not is_dev else 'dev'
         self.__tmpdir = os.path.join(tmpdir, '{}_{}_iso'.format(self.__conf.reponame, repotype))
@@ -857,65 +826,6 @@ class DebianIsoRepository:
                                                             distro=self.__conf.distro,
                                                             arch=self.__arch)
         make_iso(isopath, self.__name, label, self.__tmpdir)
-
-
-class RepositoryFullCache:
-    def __init__(self, conf):
-        self.__conf = conf
-        self.__result_cache = {}
-        self.__caches = []
-
-    def load(self):
-        cache_paths = (glob.glob(os.path.join(self.__conf.root, 'cache', self.__conf.distro, '*.cache')) +
-                       glob.glob(os.path.join(self.__conf.cachedirpath, '*.cache')))
-        for cache_path in cache_paths:
-            self.__caches.append(RepositoryCache.load(self.__conf, cache_path))
-        self.__caches = sorted(self.__caches)
-        # Валидация
-        if len(self.__caches) <= 1:
-            exit_with_error(_('Caches for OS and OS-DEV repositories are required'))
-        for repo, repo_type in (('OS', PackageType.PACKAGE_FROM_OS_REPO),
-                                ('OS-DEV', PackageType.PACKAGE_FROM_OS_DEV_REPO)):
-            caches = self._cache_by_type(repo_type)
-            if len(caches) < 1:
-                exit_with_error(_('Cache for {} repo is required').format(repo))
-            elif len(caches) > 1:
-                logging.warning(_('Found {} {} repos').format(len(caches), repo))
-
-    def _cache_by_type(self, ctype):
-        return [c for c in self.__caches if c.ctype == ctype]
-
-    @property
-    def builded_cache(self):
-        return self._cache_by_type(PackageType.PACKAGE_BUILDED)[0]
-
-    def binaries_from_same_sources(self, dep):
-        build_cache = self.builded_cache
-        return build_cache.binaries_from_same_sources(dep)
-
-    def find_dependencies(self, dep, required_by):
-        # Note: Тип, строка зависимости, котеж имя-версия пакета, зависимости
-        # или PackageType.PACKAGE_NOT_FOUND, depstr, None, None
-        depstr = form_dependency(dep)
-        item = None
-        logging.debug(_('Finding dependency {} required by {} ...'.format(depstr, required_by)))
-        # Наивная проверка: пробуем кэш результатов
-        if dep in self.__result_cache:
-            return self.__result_cache.get(dep)
-        for c in self.__caches:
-            depinfo = c.find_dependency(dep)
-            if depinfo is not None:
-                resolved, deps, binaries = depinfo
-                logging.debug(_('Dependency {} resolved by {} = {} ({} repo)').format(
-                    depstr, *resolved, c.name))
-                item = c.ctype, depstr, resolved, deps, binaries
-                break
-        if item is None:
-            logging.debug(_('Dependency {} NOT FOUND').format(depstr))
-            item = PackageType.PACKAGE_NOT_FOUND, depstr, None, required_by, None
-        # Кэшируем результат
-        self.__result_cache[dep] = item
-        return item
 
 
 class RepositoryCache:
@@ -1144,6 +1054,65 @@ class RepositoryCache:
         return None
 
 
+class RepositoryFullCache:
+    def __init__(self):
+        self.__conf = Configuration.instance()
+        self.__result_cache = {}
+        self.__caches = []
+
+    def load(self):
+        cache_paths = (glob.glob(os.path.join(self.__conf.root, 'cache', self.__conf.distro, '*.cache')) +
+                       glob.glob(os.path.join(self.__conf.cachedirpath, '*.cache')))
+        for cache_path in cache_paths:
+            self.__caches.append(RepositoryCache.load(self.__conf, cache_path))
+        self.__caches = sorted(self.__caches)
+        # Валидация
+        if len(self.__caches) <= 1:
+            exit_with_error(_('Caches for OS and OS-DEV repositories are required'))
+        for repo, repo_type in (('OS', PackageType.PACKAGE_FROM_OS_REPO),
+                                ('OS-DEV', PackageType.PACKAGE_FROM_OS_DEV_REPO)):
+            caches = self._cache_by_type(repo_type)
+            if len(caches) < 1:
+                exit_with_error(_('Cache for {} repo is required').format(repo))
+            elif len(caches) > 1:
+                logging.warning(_('Found {} {} repos').format(len(caches), repo))
+
+    def _cache_by_type(self, ctype):
+        return [c for c in self.__caches if c.ctype == ctype]
+
+    @property
+    def builded_cache(self):
+        return self._cache_by_type(PackageType.PACKAGE_BUILDED)[0]
+
+    def binaries_from_same_sources(self, dep):
+        build_cache = self.builded_cache
+        return build_cache.binaries_from_same_sources(dep)
+
+    def find_dependencies(self, dep, required_by):
+        # Note: Тип, строка зависимости, котеж имя-версия пакета, зависимости
+        # или PackageType.PACKAGE_NOT_FOUND, depstr, None, None
+        depstr = form_dependency(dep)
+        item = None
+        logging.debug(_('Finding dependency {} required by {} ...'.format(depstr, required_by)))
+        # Наивная проверка: пробуем кэш результатов
+        if dep in self.__result_cache:
+            return self.__result_cache.get(dep)
+        for c in self.__caches:
+            depinfo = c.find_dependency(dep)
+            if depinfo is not None:
+                resolved, deps, binaries = depinfo
+                logging.debug(_('Dependency {} resolved by {} = {} ({} repo)').format(
+                    depstr, *resolved, c.name))
+                item = c.ctype, depstr, resolved, deps, binaries
+                break
+        if item is None:
+            logging.debug(_('Dependency {} NOT FOUND').format(depstr))
+            item = PackageType.PACKAGE_NOT_FOUND, depstr, None, required_by, None
+        # Кэшируем результат
+        self.__result_cache[dep] = item
+        return item
+
+
 class SourcesList:
     (SL_PKGNAME,
      SL_PKGVERSION) = range(2)
@@ -1194,6 +1163,42 @@ class SourcesList:
                          for p in self.__build_list)
 
 
+class BaseCommand:
+    cmd = None
+    cmdhelp = None
+    alias = None
+    root_required = False
+    required_binaries = []
+
+    def __init__(self, conf):
+        env_conf = os.environ.get('BUILDREPO_CONF')
+        if env_conf:
+            conf_path = os.path.abspath(env_conf)
+        else:
+            conf_path = os.path.abspath(conf)
+        if not os.path.exists(os.path.dirname(conf_path)):
+            os.makedirs(os.path.dirname(conf_path))
+        self._conf = Configuration(conf_path)
+        if self.root_required and not os.getuid() == 0:
+            exit_with_error(_('Must be run as superuser'))
+        self.__check_required_binaries()
+        if not self.cmd == 'init' and not self._conf.directories_created():
+            exit_with_error(_('Required directories not created. '
+                              'Please, run `{} init` first.').format(sys.argv[0]))
+
+    def __check_required_binaries(self):
+        missing_binaries = []
+        for binary in self.required_binaries:
+            if shutil.which(binary) is None:
+                missing_binaries.append(binary)
+        if len(missing_binaries):
+            logging.warning(_('Missing binaries on host: {}').format(', '.join(missing_binaries)))
+            logging.warning(_('Some steps of current command may failed'))
+
+    def run(self):
+        raise NotImplementedError()
+
+
 class _RepoAnalyzerCmd(BaseCommand):
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
     alias = 'binary-repo'
@@ -1201,10 +1206,10 @@ class _RepoAnalyzerCmd(BaseCommand):
     def __init__(self, conf_path):
         super().__init__(conf_path)
         self._caches = []
-        self._rfcache = RepositoryFullCache(self._conf)
+        self._rfcache = RepositoryFullCache()
         self.__build_cache_of_builded_packages()
         self._rfcache.load()
-        self._depfinder = DependencyFinder(self._conf, self._rfcache)
+        self._depfinder = DependencyFinder(self._rfcache)
         self._builded_cache = self._rfcache.builded_cache
 
     def __build_cache_of_builded_packages(self):
@@ -1380,7 +1385,7 @@ class BuildCmd(BaseCommand):
     def __make_build(self, jobs, rebuild, clean):
         # Определяем факт наличия chroot'а
         logging.info(_('Following packages are found in build list: \n{}').format(self.__sources_list.build_list_str))
-        dist_chroot = NSPContainer(self._conf)
+        dist_chroot = NSPContainer()
         if not dist_chroot.exists():
             exit_with_error(_('Chroot for {} does not created').format(dist_chroot.name))
         for pkgname, version in self.__sources_list.build_list:
@@ -1510,7 +1515,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         # Анализ пакетов основного репозитория
         target_builded_deps = set()
         sources = dict()
-        tmpdirpath = tmpdirmanager.create()
+        tmpdirpath = TemporaryDirManager.instance().create()
         frepodirpath = os.path.join(tmpdirpath, '{}_main'.format(self._conf.reponame))
         frepodevdirpath = os.path.join(tmpdirpath, '{}_dev'.format(self._conf.reponame))
         fsrcdirpath = os.path.join(tmpdirpath, '{}_src'.format(self._conf.reponame))
@@ -1622,7 +1627,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         for items in ((frepodirpath, False),
                       (frepodevdirpath, True)):
             pkgpath, is_dev = items
-            iso_maker = DebianIsoRepository(self._conf, tmpdirpath, is_dev)
+            iso_maker = DebianIsoRepository(tmpdirpath, is_dev)
             iso_maker.create(pkgpath)
         # Формируем образ диска с исходниками
         # Создаем каталог для образа диска с исходниками
@@ -1846,7 +1851,7 @@ class MakeDebianChrootCmd(BaseCommand):
     required_binaries = ['debootstrap', 'systemd-nspawn']
 
     def run(self):
-        nsconainer = NSPContainer(self._conf)
+        nsconainer = NSPContainer()
         nsconainer.create()
 
 
@@ -1867,7 +1872,7 @@ class ChrootLoginCmd(BaseCommand):
     required_binaries = ['systemd-nspawn']
 
     def run(self, boot, deploy, bind):
-        nsconainer = NSPContainer(self._conf)
+        nsconainer = NSPContainer()
         if not nsconainer.deployed():
             if deploy:
                 nsconainer.deploy()
@@ -1947,7 +1952,7 @@ class SourcesSortCmd(BaseCommand):
         return ordered, unordered
 
     def run(self, verbose=False):
-        rfcache = RepositoryFullCache(self._conf)
+        rfcache = RepositoryFullCache()
         rfcache.load()
         self.__build_cache = rfcache.builded_cache
         for pkgname, pkgversion in self.__sources_list.build_list:
@@ -2048,7 +2053,7 @@ def register_atexit_callbacks():
                 shutil.chown(file, user, group)
 
     def remove_temp_directory_atexit_callback():
-        for directory in tmpdirmanager.dirs():
+        for directory in TemporaryDirManager.instance().dirs:
             if os.path.exists(directory):
                 shutil.rmtree(directory)
 
