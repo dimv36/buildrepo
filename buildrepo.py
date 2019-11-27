@@ -1515,7 +1515,9 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             if m:
                 package_name = m.group('name')
                 dev_packages.append(package_name)
-        dev_packages = sorted([p for p in set(dev_packages) - set(self._packages['target'])])
+        target_packages = map(lambda x: re.match(r'(?P<name>.*)_.*_.*.deb', os.path.basename(x)).group('name'),
+                              target_builded_deps)
+        dev_packages = sorted([p for p in (set(dev_packages) - set(target_packages))])
         for devpkg in dev_packages:
             logging.info(_('Processing {} ...').format(devpkg))
             deps = self._get_depends_for_package(devpkg, flags=DependencyFinder.FLAG_FINDER_DEV)
