@@ -5,8 +5,6 @@ import sys
 import logging
 import re
 import gettext
-import apt.debfile
-import apt_pkg
 import glob
 import shutil
 import subprocess
@@ -14,6 +12,13 @@ import datetime
 import configparser
 import contextlib
 import warnings
+try:
+    import apt.debfile
+    import apt_pkg
+except ImportError:
+    sys.stderr.write(gettext.gettext('Those script is required `apt` module\n'))
+    sys.exit(1)
+
 
 # gettext
 _ = gettext.gettext
