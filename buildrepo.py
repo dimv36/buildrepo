@@ -168,10 +168,12 @@ class Configuration:
             logging.basicConfig(level=logging.INFO,
                                 format='%(levelname)-8s: %(message)s')
         runmsg = _('Running {} ...').format(' '.join(sys.argv))
+        confmsg = _('Using config from {} ...').format(self.conf_path)
         build_root_msg = _('Using build-root as {}').format(self.root)
-        msgmaxlen = max(len(runmsg), len(build_root_msg)) + 1
+        msgmaxlen = max(len(runmsg), len(build_root_msg), len(confmsg)) + 1
         logging.info('*' * msgmaxlen)
         logging.info(runmsg)
+        logging.info(confmsg)
         logging.info(build_root_msg)
         logging.info('*' * msgmaxlen)
 
@@ -562,10 +564,14 @@ class BaseCommand:
     required_binaries = []
 
     def __init__(self, conf):
-        conf = os.path.abspath(conf)
-        if not os.path.exists(os.path.dirname(conf)):
-            os.makedirs(os.path.dirname(conf))
-        self._conf = Configuration(conf)
+        env_conf = os.environ.get('BUILDREPO_CONF')
+        if env_conf:
+            conf_path = os.path.abspath(env_conf)
+        else:
+            conf_path = os.path.abspath(conf)
+        if not os.path.exists(os.path.dirname(conf_path)):
+            os.makedirs(os.path.dirname(conf_path))
+        self._conf = Configuration(conf_path)
         if self.root_required and not os.getuid() == 0:
             exit_with_error(_('Must be run as superuser'))
         self.__check_required_binaries()
@@ -625,7 +631,7 @@ class DependencyFinder:
         return self.__deps
 
     def __exec_exclude_filter(self, binaries, filter_list, func=None):
-        if not (self.__flags & DependencyFinder.FLAG_FINDER_MAIN):
+        if not (self.__flags & DependencyFinder.FLAG_FINDER_MAIN) or filter_list is None:
             return binaries
         processed = []
         for binary in binaries:
@@ -651,10 +657,9 @@ class DependencyFinder:
                                                                self.__exclude_rules,
                                                                func=lambda x, y: x.endswith(y))
                 # Прокатываем black list
-                if len(self.__black_list):
-                    filtered_binaries = self.__exec_exclude_filter(filtered_binaries,
-                                                                   self.__black_list,
-                                                                   func=lambda x, y: x == y)
+                filtered_binaries = self.__exec_exclude_filter(filtered_binaries,
+                                                               self.__black_list,
+                                                               func=lambda x, y: x == y)
                 # Считаем эти бинари зависимостями на основной диск
                 for binary in filtered_binaries:
                     dependency = [binary]
@@ -1158,56 +1163,11 @@ class _RepoAnalyzerCmd(BaseCommand):
 
     def __init__(self, conf_path):
         super().__init__(conf_path)
-        self._white_list_path = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'white-list', fallback=None)
-        self._dev_packages_suffixes = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'dev-package-suffixes',
-                                                            fallback=MakeRepoCmd._DEFAULT_DEV_PACKAGES_SUFFIXES)
-        if not self._white_list_path:
-            exit_with_error(_('White list does not specified in {}').format(self._conf.conf_path))
-        if not os.path.exists(self._white_list_path):
-            exit_with_error(_('File {} does not exist').format(self.__white_list_path))
-        if isinstance(self._dev_packages_suffixes, str):
-            self._dev_packages_suffixes = [item.strip() for item in self._dev_packages_suffixes.split(',')]
-        logging.info(_('Using {} rule for packages for 2nd disk').format(
-            ', '.join(self._dev_packages_suffixes)))
-        self._packages = {}
         self._caches = []
         self._rfcache = RepositoryFullCache(self._conf)
         self.__build_cache_of_builded_packages()
         self._rfcache.load()
         self._builded_cache = self._rfcache.builded_cache
-        self.__parse_white_list()
-
-    def __parse_white_list(self):
-        i = 1
-        last_section = None
-        for line in open(self._white_list_path, mode='r').readlines():
-            i += 1
-            if line.startswith('#') or line == '\n':
-                continue
-            line = line.rstrip('\n')
-            if line.startswith('[') and line.endswith(']'):
-                last_section = line[1:-1]
-                self._packages[last_section] = []
-            else:
-                if last_section is None:
-                    exit_with_error(_('Got package at line {}, '
-                                      'but section expected').format(i))
-                packages = self._packages.get(last_section)
-                if line in packages:
-                    logging.warning(_('Package {} already in {}, skipped').format(line, last_section))
-                    continue
-                packages.append(line)
-                self._packages[last_section] = packages
-        if 'target' not in self._packages:
-            exit_with_error(_('White list for target repository is empty'))
-        # Проверка на пересечение
-        all_pkgs = set()
-        for section, packages in self._packages.items():
-            if not len(all_pkgs):
-                all_pkgs = set(packages)
-                continue
-            if (all_pkgs & set(packages)):
-                exit_with_error(_('Intersection is found in lists'))
 
     def __build_cache_of_builded_packages(self):
         logging.info(_('Building cache for builded packages ...'))
@@ -1445,6 +1405,52 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             else:
                 exit_with_error(_('File {} does not exists').format(abspath))
         self.__sources_include = sources
+        self.__packages = {}
+        white_list = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'white-list', fallback=None)
+        self.__dev_packages_suffixes = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'dev-package-suffixes',
+                                                             fallback=MakeRepoCmd._DEFAULT_DEV_PACKAGES_SUFFIXES)
+        if not white_list:
+            exit_with_error(_('White list does not specified in {}').format(self._conf.conf_path))
+        white_list = os.path.abspath(white_list)
+        if not os.path.exists(white_list):
+            exit_with_error(_('File {} does not exist').format(white_list))
+        self.__parse_white_list(white_list)
+        if isinstance(self.__dev_packages_suffixes, str):
+            self.__dev_packages_suffixes = [item.strip() for item in self.__dev_packages_suffixes.split(',')]
+        logging.info(_('Using {} rule for packages for 2nd disk').format(
+            ', '.join(self.__dev_packages_suffixes)))
+
+    def __parse_white_list(self, white_list_path):
+        i = 1
+        last_section = None
+        for line in open(white_list_path, mode='r').readlines():
+            i += 1
+            if line.startswith('#') or line == '\n':
+                continue
+            line = line.rstrip('\n')
+            if line.startswith('[') and line.endswith(']'):
+                last_section = line[1:-1]
+                self.__packages[last_section] = []
+            else:
+                if last_section is None:
+                    exit_with_error(_('Got package at line {}, '
+                                      'but section expected').format(i))
+                packages = self.__packages.get(last_section)
+                if line in packages:
+                    logging.warning(_('Package {} already in {}, skipped').format(line, last_section))
+                    continue
+                packages.append(line)
+                self.__packages[last_section] = packages
+        if 'target' not in self.__packages:
+            exit_with_error(_('White list for target repository is empty'))
+        # Проверка на пересечение
+        all_pkgs = set()
+        for section, packages in self.__packages.items():
+            if not len(all_pkgs):
+                all_pkgs = set(packages)
+                continue
+            if (all_pkgs & set(packages)):
+                exit_with_error(_('Intersection is found in lists'))
 
     def __sources(self, pkg, version):
         # Определяем исходники по имени бинарного пакета и вресии
@@ -1470,11 +1476,11 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         fsrcdirpath = os.path.join(tmpdirpath, '{}_src'.format(self._conf.reponame))
         for subdir in (frepodirpath, frepodevdirpath, fsrcdirpath):
             os.makedirs(subdir, exist_ok=True)
-        for required in self._packages['target']:
+        for required in self.__packages['target']:
             logging.info(_('Processing {} ...').format(required))
             deps = self._get_depends_for_package(required,
-                                                 exclude_rules=self._dev_packages_suffixes,
-                                                 black_list=self._packages.get('target-dev', []))
+                                                 exclude_rules=self.__dev_packages_suffixes,
+                                                 black_list=self.__packages.get('target-dev', []))
             unresolve = [d for d in deps if d[DependencyFinder.DF_DEST] == PackageType.PACKAGE_NOT_FOUND]
             deps_in_dev = [d for d in deps if d[DependencyFinder.DF_DEST] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
                                                                               PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
