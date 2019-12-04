@@ -690,10 +690,12 @@ class DependencyFinder:
                 # Alternative dependency?
                 item = None
                 resolved = None
+                depdest = None
                 for dpitem in dep:
                     dpitem = tuple(dpitem)
                     seen_item = (dpitem, required_by,)
                     if seen_item in self.__seendeps:
+                        item, unused = seen_item
                         continue
                     depdest, pdstinfo, resolved, *unused = self.__rfcache.find_dependencies(*seen_item)
                     if depdest == PackageType.PACKAGE_NOT_FOUND:
@@ -712,7 +714,7 @@ class DependencyFinder:
                 if self.__flags & DependencyFinder.FLAG_FINDER_MAIN and not item:
                     alt_dep_full = ' | '.join(form_dependency(d) for d in dep)
                     # Can't resolve alternative dependency, got the last
-                    last_alt_dep = dep[-1]
+                    last_alt_dep = tuple(dep[-1])
                     item = (depdest, last_alt_dep, resolved, required_by)
                     logging.warning(_('Runtime dependency resolving {} failed for {}').format(
                         alt_dep_full, form_dependency(p)))
@@ -1318,7 +1320,7 @@ class BuildCmd(BaseCommand):
 
     def __init__(self, conf_path):
         super().__init__(conf_path)
-        self.__distribution_info = ChrootDistributionInfo(self._conf)
+        self.__distribution_info = ChrootDistributionInfo()
         self.__sources_list = SourcesList(self._conf)
         self.__sources_list.load()
 
