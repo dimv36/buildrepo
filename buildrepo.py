@@ -69,7 +69,7 @@ def make_iso(isopath, target, label, tmpdir, sources_iso=False):
         if not xorrisofs_bin:
             exit_with_error(_('Failed to find {} binary').format('xorrisofs'))
         if not run_command_log([xorrisofs_bin, '-r', '-J', '-joliet-long',
-                                '-o', isopath, tmpdir]):
+                                '-V', label, '-o', isopath, tmpdir]):
             exit_with_error(_('Failed to create ISO image'))
 
 
