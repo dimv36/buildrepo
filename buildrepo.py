@@ -2036,7 +2036,7 @@ def register_atexit_callbacks():
         except KeyError:
             logging.warning(_('Failed get group name for GID {}').format(sudo_gid))
             exit(0)
-        conf = Configuration(args.config)
+        conf = Configuration.instance()
         if not conf.directories_created():
             return
         for item in (os.path.join(conf.root, 'logs'),
