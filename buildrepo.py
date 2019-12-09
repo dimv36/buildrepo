@@ -760,6 +760,7 @@ class DependencyFinder:
 
 class DebianIsoRepository:
     import platform
+    _ISO_VOLID_MAXLEN = 32
 
     def __init__(self, tmpdir, is_dev):
         self.__conf = Configuration.instance()
@@ -773,6 +774,12 @@ class DebianIsoRepository:
         self.__reprepro_bin = None
         self.__arch = None
         self.__base_init()
+
+    @staticmethod
+    def is_valid_repo(name, version):
+        reponames = ('{} {}'.format(name, version),
+                     '{}-devel {}'.format(name, version))
+        return all(map(lambda x: len(x) < DebianIsoRepository._ISO_VOLID_MAXLEN, reponames))
 
     def __base_init(self):
         conf_directory = os.path.join(self.__tmpdir, 'conf')
@@ -805,6 +812,7 @@ class DebianIsoRepository:
                                                                              arch=self.__arch))
 
     def create(self, packagesdir):
+        now = datetime.datetime.now().strftime('%Y-%m-%d')
         with change_directory(self.__tmpdir):
             logging.info(_('Creating repository for {} via reprepro ...').format(self.__name))
             for package in glob.glob('{}/*.deb'.format(packagesdir)):
@@ -813,17 +821,20 @@ class DebianIsoRepository:
                     exit_with_error(_('Including binaries to repo failure'))
             for directory in ['db', 'conf']:
                 shutil.rmtree(directory)
-        now = datetime.datetime.now().strftime('%Y-%m-%d')
+            # Build label
+            with open('buildinfo', mode='w') as fp:
+                fp.write('{repo} {version} ({distro}) {arch} at {date}\n'.format(repo=self.__name,
+                                                                                 version=self.__conf.repoversion,
+                                                                                 distro=self.__conf.distro,
+                                                                                 arch=self.__arch,
+                                                                                 date=now))
         isoname = '{repo}_{version}_{distro}_{date}.iso'.format(repo=self.__name,
                                                                 version=self.__conf.repoversion,
                                                                 distro=self.__conf.distro,
                                                                 date=now)
         isopath = os.path.join(self.__conf.isodirpath, isoname)
-        label = '{repo} {version} ({distro}) {arch}'.format(repo=self.__name,
-                                                            version=self.__conf.repoversion,
-                                                            distro=self.__conf.distro,
-                                                            arch=self.__arch)
-        make_iso(isopath, self.__name, label, self.__tmpdir)
+        iso_label = '{repo} {version}'.format(repo=self.__name, version=self.__conf.repoversion)
+        make_iso(isopath, self.__name, iso_label, self.__tmpdir)
 
 
 class RepositoryCache:
