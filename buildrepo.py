@@ -16,7 +16,12 @@ try:
     import apt.debfile
     import apt_pkg
 except ImportError:
-    sys.stderr.write(gettext.gettext('Those script is required `apt` module\n'))
+    sys.stderr.write(gettext.gettext('This script requires `apt` module\n'))
+    sys.exit(1)
+
+# Check Python version
+if not sys.version_info >= (3, 5,):
+    sys.stderr.write(gettext.gettext('This script required Python 3.5 and above\n'))
     sys.exit(1)
 
 
