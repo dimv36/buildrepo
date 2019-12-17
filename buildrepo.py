@@ -285,6 +285,20 @@ class NSPContainer:
         return self.__bind_directories
 
     def _exec_command_log(self, cmdargs, log_file, recreate_log=False):
+        def tail(fp, n):
+            assert n >= 0
+            pos, lines = n + 1, []
+            while len(lines) <= n:
+                try:
+                    fp.seek(-pos, 2)
+                except IOError:
+                    fp.seek(0)
+                    break
+                finally:
+                    lines = list(fp)
+                pos *= 2
+            return lines[-n:]
+
         import time
         if log_file:
             mode = 'a' if os.path.exists(log_file) and not recreate_log else 'w'
@@ -309,6 +323,12 @@ class NSPContainer:
             logstream.write('\nReturncode: {}'.format(proc.returncode))
             logstream.write('\nTime: {}\n'.format(time.strftime('%H:%M:%S', time.gmtime(end.seconds))))
             logstream.close()
+            if proc.returncode:
+                with open(log_file) as fp:
+                    last_lines = tail(fp, 10)
+                    for line in last_lines:
+                        logging.error(line.rstrip('\n'))
+                logging.info(_('HINT: see {} for details').format(log_file))
         else:
             logging.debug('Executing {} ...'.format(' '.join(cmdargs)))
             proc = subprocess.Popen(cmdargs, universal_newlines=True)
@@ -443,7 +463,8 @@ class NSPContainer:
             if chroot_script:
                 debootstrap_args.append(chroot_script)
             # Bootstrap log
-            logpath = os.path.join(os.path.dirname(self.__conf.logsdirpath), 'chroot-{}.log'.format(self.name))
+            logpath = os.path.join(os.path.dirname(self.__conf.logsdirpath),
+                                   'chroot-{}-{}.log'.format(self.name, self.__conf.reponame))
             returncode = self._exec_command_log(debootstrap_args, logpath, recreate_log=True)
             if returncode:
                 raise RuntimeError(_('Debootstrap failed: {}').format(returncode))
@@ -2032,7 +2053,11 @@ def register_atexit_callbacks():
                 shutil.chown(file, user, group)
 
     def remove_temp_directory_atexit_callback():
-        for directory in TemporaryDirManager.instance().dirs:
+        try:
+            dirs = TemporaryDirManager.instance().dirs
+        except AssertionError:
+            return
+        for directory in dirs:
             if os.path.exists(directory):
                 shutil.rmtree(directory)
 
@@ -2047,7 +2072,10 @@ def register_atexit_callbacks():
         except KeyError:
             logging.warning(_('Failed get group name for GID {}').format(sudo_gid))
             exit(0)
-        conf = Configuration.instance()
+        try:
+            conf = Configuration.instance()
+        except AssertionError:
+            return
         if not conf.directories_created():
             return
         for item in (os.path.join(conf.root, 'logs'),
