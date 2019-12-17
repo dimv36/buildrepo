@@ -21,7 +21,7 @@ except ImportError:
 
 # Check Python version
 if not sys.version_info >= (3, 5,):
-    sys.stderr.write(gettext.gettext('This script required Python 3.5 and above\n'))
+    sys.stderr.write(gettext.gettext('This script requires Python 3.5 and above\n'))
     sys.exit(1)
 
 
