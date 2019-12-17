@@ -61,18 +61,6 @@ def run_command_log(cmdargs):
     return proc.returncode == 0
 
 
-def make_iso(isopath, target, label, tmpdir, sources_iso=False):
-    with change_directory(os.path.join(tmpdir, '..')):
-        what = 'iso' if not sources_iso else 'sources iso'
-        logging.info(_('Building {} {} for {} ...').format(what, isopath, target))
-        xorrisofs_bin = shutil.which('xorrisofs')
-        if not xorrisofs_bin:
-            exit_with_error(_('Failed to find {} binary').format('xorrisofs'))
-        if not run_command_log([xorrisofs_bin, '-r', '-J', '-joliet-long',
-                                '-V', label, '-o', isopath, tmpdir]):
-            exit_with_error(_('Failed to create ISO image'))
-
-
 class TemporaryDirManager:
     import tempfile
     _instance = None
@@ -779,22 +767,60 @@ class DependencyFinder:
         return pkg
 
 
-class DebianIsoRepository:
+class _BaseIsoReposisory:
+    def __init__(self, tmpdir):
+        self._conf = Configuration.instance()
+        self.__tmpdir = tmpdir
+        self.__xorrisofs_bin = shutil.which('xorrisofs')
+        if not self.__xorrisofs_bin:
+            exit_with_error(_('Failed to find {} binary').format('xorrisofs'))
+
+    @staticmethod
+    def now():
+        return datetime.datetime.now().strftime('%Y-%m-%d')
+
+    def _iso_type(self):
+        raise NotImplementedError()
+
+    def _subdir(self):
+        raise NotImplementedError()
+
+    @property
+    def repodir(self):
+        return os.path.join(self.__tmpdir, self._subdir())
+
+    def create(self, *args, **kwargs):
+        raise NotImplementedError()
+
+    def _make_iso(self, isopath, target, label):
+        with change_directory(os.path.join(self.repodir, '..')):
+            logging.info(_('Building {} {} for {} ...').format(self._iso_type(), isopath, target))
+            if not run_command_log([self.__xorrisofs_bin, '-r', '-J', '-joliet-long',
+                                    '-V', label, '-o', isopath, self.repodir]):
+                exit_with_error(_('Failed to create ISO image'))
+
+
+class DebianIsoRepository(_BaseIsoReposisory):
     import platform
     _ISO_VOLID_MAXLEN = 32
 
     def __init__(self, tmpdir, is_dev):
-        self.__conf = Configuration.instance()
+        super(DebianIsoRepository, self).__init__(tmpdir)
         self.__is_dev = is_dev
-        repotype = 'main' if not is_dev else 'dev'
-        self.__tmpdir = os.path.join(tmpdir, '{}_{}_iso'.format(self.__conf.reponame, repotype))
-        self.__name = self.__conf.reponame
+        self.__name = self._conf.reponame
         if self.__is_dev:
             self.__name = '{}-devel'.format(self.__name)
-        self.__codename = self.__conf.distro
+        self.__codename = self._conf.distro
         self.__reprepro_bin = None
         self.__arch = None
         self.__base_init()
+
+    def _subdir(self):
+        repotype = 'main' if not self.__is_dev else 'dev'
+        return '{}_{}_iso'.format(self._conf.reponame, repotype)
+
+    def _iso_type(self):
+        return 'iso'
 
     @staticmethod
     def is_valid_repo(name, version):
@@ -803,14 +829,14 @@ class DebianIsoRepository:
         return all(map(lambda x: len(x) < DebianIsoRepository._ISO_VOLID_MAXLEN, reponames))
 
     def __base_init(self):
-        conf_directory = os.path.join(self.__tmpdir, 'conf')
+        conf_directory = os.path.join(self.repodir, 'conf')
         os.makedirs(conf_directory, exist_ok=True)
         with open(os.path.join(conf_directory, 'distributions'), mode='w') as fp:
-            codename = '{}{}'.format(self.__conf.reponame,
+            codename = '{}{}'.format(self._conf.reponame,
                                      '-devel' if self.__is_dev else '')
             fp.write('Codename: {}\n'.format(codename))
-            fp.write('Version: {}\n'.format(self.__conf.repoversion))
-            fp.write('Description: {} repository\n'.format(self.__conf.reponame))
+            fp.write('Version: {}\n'.format(self._conf.repoversion))
+            fp.write('Description: {} repository\n'.format(self._conf.reponame))
             self.__arch = self.platform.machine()
             if self.__arch == 'x86_64':
                 self.__arch = 'amd64'
@@ -821,20 +847,19 @@ class DebianIsoRepository:
         self.__reprepro_bin = shutil.which('reprepro')
         if self.__reprepro_bin is None:
             exit_with_error(_('Failed to find reprepro binary'))
-        with change_directory(self.__tmpdir):
+        with change_directory(self.repodir):
             if not run_command_log([self.__reprepro_bin, 'export']):
                 exit_with_error(_('Reprepro initialization failed'))
-        disk_directory = os.path.join(self.__tmpdir, '.disk')
+        disk_directory = os.path.join(self.repodir, '.disk')
         os.makedirs(disk_directory, exist_ok=True)
         with open(os.path.join(disk_directory, 'info'), mode='w') as fp:
             fp.write('{reponame} {version} ({distro}) - {arch} DVD\n'.format(reponame=self.__name,
-                                                                             version=self.__conf.repoversion,
-                                                                             distro=self.__conf.distro,
+                                                                             version=self._conf.repoversion,
+                                                                             distro=self._conf.distro,
                                                                              arch=self.__arch))
 
     def create(self, packagesdir):
-        now = datetime.datetime.now().strftime('%Y-%m-%d')
-        with change_directory(self.__tmpdir):
+        with change_directory(self.repodir):
             logging.info(_('Creating repository for {} via reprepro ...').format(self.__name))
             for package in glob.glob('{}/*.deb'.format(packagesdir)):
                 if not run_command_log([self.__reprepro_bin, 'includedeb',
@@ -845,17 +870,64 @@ class DebianIsoRepository:
             # Build label
             with open('buildinfo', mode='w') as fp:
                 fp.write('{repo} {version} ({distro}) {arch} at {date}\n'.format(repo=self.__name,
-                                                                                 version=self.__conf.repoversion,
-                                                                                 distro=self.__conf.distro,
+                                                                                 version=self._conf.repoversion,
+                                                                                 distro=self._conf.distro,
                                                                                  arch=self.__arch,
-                                                                                 date=now))
+                                                                                 date=self.now()))
         isoname = '{repo}_{version}_{distro}_{date}.iso'.format(repo=self.__name,
-                                                                version=self.__conf.repoversion,
-                                                                distro=self.__conf.distro,
-                                                                date=now)
-        isopath = os.path.join(self.__conf.isodirpath, isoname)
-        iso_label = '{repo} {version}'.format(repo=self.__name, version=self.__conf.repoversion)
-        make_iso(isopath, self.__name, iso_label, self.__tmpdir)
+                                                                version=self._conf.repoversion,
+                                                                distro=self._conf.distro,
+                                                                date=self.now())
+        isopath = os.path.join(self._conf.isodirpath, isoname)
+        iso_label = '{repo} {version}'.format(repo=self.__name, version=self._conf.repoversion)
+        self._make_iso(isopath, self.__name, iso_label)
+
+
+class SourceIso(_BaseIsoReposisory):
+    def __init__(self, tmpdir):
+        super(SourceIso, self).__init__(tmpdir)
+
+    def _subdir(self):
+        return '{}_src_iso'.format(self._conf.reponame)
+
+    def _iso_type(self):
+        return 'sources iso'
+
+    def create(self, fsrcdirpath, sources_include):
+        # First, creates directory for ISO
+        os.makedirs(self.repodir, exist_ok=True)
+        # Copy sources
+        shutil.copytree(fsrcdirpath, os.path.join(self.repodir, 'src'))
+        # Process build files
+        required_files = [os.path.abspath(os.path.abspath(sys.argv[0])),
+                          os.path.abspath(self._conf.chroot_helper),
+                          os.path.abspath(self._conf.parser.get(BuildCmd.cmd, 'source-list')),
+                          os.path.abspath(self._conf.parser.get(MakeRepoCmd.alias, 'white-list'))]
+        chroot_script = self._conf.parser.get('chroot', 'chroot-script', fallback=None)
+        if chroot_script:
+            required_files.append(os.path.abspath(chroot_script))
+        if len(sources_include):
+            required_files += sources_include
+        for req in required_files:
+            shutil.copyfile(req, os.path.join(self.repodir, os.path.basename(req)))
+        # Create buildrepo.conf, used for those repository
+        source_buildrepo_path = os.path.join(self.repodir, os.path.basename(self._conf.conf_path))
+        with open(source_buildrepo_path, mode='w') as sfp, open(self._conf.conf_path, mode='r') as fp:
+            keys_re = r'^(?P<key>build-root|mirror\d+|root-pwd-hash|debs)\s?\s+='
+            for line in fp.readlines():
+                line = line.strip()
+                m = re.match(keys_re, line)
+                if m:
+                    sfp.write('# {} =\n'.format(m.group('key')))
+                else:
+                    sfp.write(line + '\n')
+        isoname = 'sources-{}_{}_{}_{}.iso'.format(self._conf.reponame,
+                                                   self._conf.repoversion,
+                                                   self._conf.distro,
+                                                   self.now())
+        isopath = os.path.join(self._conf.isodirpath, isoname)
+        label = '{} {} (sources)'.format(self._conf.reponame, self._conf.repoversion)
+        self._make_iso(isopath, self._conf.reponame, label)
 
 
 class RepositoryCache:
@@ -1522,7 +1594,12 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         return tuple(dscfile.filelist + [os.path.basename(dscfilepath)])
 
     def run(self):
-        logging.info(_('Processing target repository ...'))
+        def log_stage(msg):
+            logging.info('=' * len(msg))
+            logging.info(msg)
+            logging.info('=' * len(msg))
+
+        log_stage(_('Processing target repository ...'))
         target_builded_deps = set()
         sources = dict()
         tmpdirpath = TemporaryDirManager.instance().create()
@@ -1567,7 +1644,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                     shutil.copyfile(f, dst)
                 except Exception as e:
                     exit_with_error(e)
-        logging.info(_('Processing dev repository ...'))
+        log_stage(_('Processing dev repository ...'))
         # Determine packages for second disk
         dev_packages = []
         for f in os.listdir(self._conf.repodirpath):
@@ -1620,7 +1697,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                 reversed_sources[value].append(key)
         for sourcelist, packages in reversed_sources.items():
             packages = list(set(packages))
-            logging.info(_('Copying sources for package(s) {} ...').format(', '.join(packages)))
+            logging.debug(_('Copying sources for package(s) {} ...').format(', '.join(packages)))
             for source in sourcelist:
                 src = os.path.join(self._conf.srcdirpath, source)
                 dst = os.path.join(fsrcdirpath, os.path.basename(source))
@@ -1629,6 +1706,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                     shutil.copyfile(src, dst)
                 except Exception as e:
                     exit_with_error(e)
+        log_stage(_('Making ISO repositories ...'))
         # Creates reprepro images for binary repositories (main и dev)
         for items in ((frepodirpath, False),
                       (frepodevdirpath, True)):
@@ -1638,26 +1716,8 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         # Creates sources ISO disk
         sources_iso_tmpdir = os.path.join(tmpdirpath, '{}_src_iso'.format(self._conf.reponame))
         os.makedirs(sources_iso_tmpdir, exist_ok=True)
-        shutil.copytree(fsrcdirpath, os.path.join(sources_iso_tmpdir, 'src'))
-        required_files = [os.path.abspath(os.path.abspath(sys.argv[0])),
-                          os.path.abspath(self._conf.chroot_helper),
-                          os.path.abspath(self._conf.parser.get(BuildCmd.cmd, 'source-list')),
-                          os.path.abspath(self._conf.parser.get(MakeRepoCmd.alias, 'white-list'))]
-        chroot_script = self._conf.parser.get('chroot', 'chroot-script', fallback=None)
-        if chroot_script:
-            required_files.append(os.path.abspath(chroot_script))
-        if len(self.__sources_include):
-            required_files += self.__sources_include
-        for req in required_files:
-            shutil.copyfile(req, os.path.join(sources_iso_tmpdir, os.path.basename(req)))
-        now = datetime.datetime.now().strftime('%Y-%m-%d')
-        isoname = 'sources-{}_{}_{}_{}.iso'.format(self._conf.reponame,
-                                                   self._conf.repoversion,
-                                                   self._conf.distro,
-                                                   now)
-        isopath = os.path.join(self._conf.isodirpath, isoname)
-        label = '{} {} (sources)'.format(self._conf.reponame, self._conf.repoversion)
-        make_iso(isopath, self._conf.reponame, label, sources_iso_tmpdir, sources_iso=True)
+        sources_iso = SourceIso(sources_iso_tmpdir)
+        sources_iso.create(fsrcdirpath, self.__sources_include)
 
 
 class MakePackageCacheCmd(BaseCommand):
