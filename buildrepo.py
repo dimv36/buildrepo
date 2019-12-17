@@ -48,19 +48,6 @@ def change_directory(newdirpath):
     os.chdir(curdir)
 
 
-def run_command_log(cmdargs):
-    proc = subprocess.Popen(cmdargs,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            universal_newlines=True)
-    out, unused = proc.communicate()
-    if proc.returncode:
-        logging.error(_('Command {} execution failed with code {}').format(' '.join(cmdargs),
-                                                                           proc.returncode))
-        logging.error(_('Out was: \n{}'.format(out)))
-    return proc.returncode == 0
-
-
 class TemporaryDirManager:
     import tempfile
     _instance = None
@@ -792,11 +779,23 @@ class _BaseIsoReposisory:
     def create(self, *args, **kwargs):
         raise NotImplementedError()
 
+    def _run_command_log(self, cmdargs):
+        proc = subprocess.Popen(cmdargs,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                universal_newlines=True)
+        out, unused = proc.communicate()
+        if proc.returncode:
+            logging.error(_('Command {} execution failed with code {}').format(' '.join(cmdargs),
+                                                                               proc.returncode))
+            logging.error(_('Out was: \n{}'.format(out)))
+        return proc.returncode == 0
+
     def _make_iso(self, isopath, target, label):
         with change_directory(os.path.join(self.repodir, '..')):
             logging.info(_('Building {} {} for {} ...').format(self._iso_type(), isopath, target))
-            if not run_command_log([self.__xorrisofs_bin, '-r', '-J', '-joliet-long',
-                                    '-V', label, '-o', isopath, self.repodir]):
+            if not self._run_command_log([self.__xorrisofs_bin, '-r', '-J', '-joliet-long',
+                                          '-V', label, '-o', isopath, self.repodir]):
                 exit_with_error(_('Failed to create ISO image'))
 
 
@@ -848,7 +847,7 @@ class DebianIsoRepository(_BaseIsoReposisory):
         if self.__reprepro_bin is None:
             exit_with_error(_('Failed to find reprepro binary'))
         with change_directory(self.repodir):
-            if not run_command_log([self.__reprepro_bin, 'export']):
+            if not self._run_command_log([self.__reprepro_bin, 'export']):
                 exit_with_error(_('Reprepro initialization failed'))
         disk_directory = os.path.join(self.repodir, '.disk')
         os.makedirs(disk_directory, exist_ok=True)
@@ -862,8 +861,8 @@ class DebianIsoRepository(_BaseIsoReposisory):
         with change_directory(self.repodir):
             logging.info(_('Creating repository for {} via reprepro ...').format(self.__name))
             for package in glob.glob('{}/*.deb'.format(packagesdir)):
-                if not run_command_log([self.__reprepro_bin, 'includedeb',
-                                        self.__name, package]):
+                if not self._run_command_log([self.__reprepro_bin, 'includedeb',
+                                              self.__name, package]):
                     exit_with_error(_('Including binaries to repo failure'))
             for directory in ['db', 'conf']:
                 shutil.rmtree(directory)
