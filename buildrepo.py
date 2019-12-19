@@ -325,7 +325,7 @@ class NSPContainer:
         if not nspawn_bin:
             exit_with_error(_('systemd-nspawn does not found'))
         nspawn_args = [nspawn_bin, '-D', container_path,
-                       '--hostname={}'.format(self.__name), '-E', 'LC_ALL=C']
+                       '-M', self.__name, '-E', 'LC_ALL=C']
         for src, dstinfo in self.bind_directories.items():
             dst, mode = dstinfo
             if mode == 'ro':
@@ -502,7 +502,7 @@ class NSPContainer:
             # Creates builder
             build_user = self.__dist_info.get('build-user')
             logging.info(_('Create user {} in chroot {} ...').format(build_user, self.name))
-            returncode = self._exec_nspawn(['/sbin/adduser', build_user,
+            returncode = self._exec_nspawn(['adduser', build_user,
                                             '--disabled-password', '--gecos', 'chroot-builder'],
                                            dist_chroot_dir, logpath)
             if returncode:
