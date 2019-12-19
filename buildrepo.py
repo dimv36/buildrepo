@@ -160,6 +160,9 @@ class Configuration:
             formatter = logging.Formatter('%(levelname)-8s: %(message)s')
             console.setFormatter(formatter)
             logging.getLogger('').addHandler(console)
+        else:
+            logging.basicConfig(level=logging.INFO,
+                                format='%(levelname)-8s: %(message)s')
         runmsg = _('Running {} ...').format(' '.join(sys.argv))
         confmsg = _('Using config from {} ...').format(self.conf_path)
         build_root_msg = _('Using build-root as {}').format(self.root)
