@@ -33,6 +33,9 @@ warnings.filterwarnings('ignore')
 
 
 def exit_with_error(error):
+    if not len(logging.root.handlers):
+        logging.basicConfig(level=logging.INFO,
+                            format='%(levelname)-8s: %(message)s')
     logging.critical(error)
     exit(1)
 
@@ -64,7 +67,8 @@ class TemporaryDirManager:
 
     @classmethod
     def instance(cls):
-        assert cls._instance is not None, '{} is not inited'.format(cls.__name__)
+        if cls._instance is None:
+            raise RuntimeError('{} is not inited'.format(cls.__name__))
         return cls._instance
 
     def __init__(self, prefix='buildrepo', basedir=None):
@@ -99,7 +103,8 @@ class Configuration:
 
     @classmethod
     def instance(cls):
-        assert cls._instance is not None, '{} is not inited'.format(cls.__name__)
+        if cls._instance is None:
+            raise RuntimeError('{} is not inited'.format(cls.__name__))
         return cls._instance
 
     def __init__(self, conf_path):
@@ -155,9 +160,6 @@ class Configuration:
             formatter = logging.Formatter('%(levelname)-8s: %(message)s')
             console.setFormatter(formatter)
             logging.getLogger('').addHandler(console)
-        else:
-            logging.basicConfig(level=logging.INFO,
-                                format='%(levelname)-8s: %(message)s')
         runmsg = _('Running {} ...').format(' '.join(sys.argv))
         confmsg = _('Using config from {} ...').format(self.conf_path)
         build_root_msg = _('Using build-root as {}').format(self.root)
@@ -2119,7 +2121,7 @@ def register_atexit_callbacks():
     def remove_temp_directory_atexit_callback():
         try:
             dirs = TemporaryDirManager.instance().dirs
-        except AssertionError:
+        except RuntimeError:
             return
         for directory in dirs:
             if os.path.exists(directory):
@@ -2138,20 +2140,20 @@ def register_atexit_callbacks():
             exit(0)
         try:
             conf = Configuration.instance()
-        except AssertionError:
-            return
-        if not conf.directories_created():
-            return
-        for item in (os.path.join(conf.root, 'logs'),
-                     os.path.join(conf.root, 'repo'),
-                     conf.cachedirpath,
-                     conf.chrootsdirpath):
-            _chown_recurse(item, sudo_user, sudo_group)
-        # Log files
-        for file in (os.path.join(conf.root, 'logs', conf.distro, 'chroot-{}.log'.format(conf.distro)),
-                     os.path.join(conf.root, 'build-{}.log'.format(conf.reponame))):
-            if os.path.exists(file):
-                shutil.chown(file, sudo_user, sudo_group)
+            if not conf.directories_created():
+                return
+            for item in (os.path.join(conf.root, 'logs'),
+                         os.path.join(conf.root, 'repo'),
+                         conf.cachedirpath,
+                         conf.chrootsdirpath):
+                _chown_recurse(item, sudo_user, sudo_group)
+            # Log files
+            for file in (os.path.join(conf.root, 'logs', conf.distro, 'chroot-{}.log'.format(conf.distro)),
+                         os.path.join(conf.root, 'build-{}.log'.format(conf.reponame))):
+                if os.path.exists(file):
+                    shutil.chown(file, sudo_user, sudo_group)
+        except (RuntimeError, AttributeError):
+            pass
 
     import atexit
     atexit.register(remove_temp_directory_atexit_callback)
