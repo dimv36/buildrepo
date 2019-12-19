@@ -408,6 +408,8 @@ class NSPContainer:
                                        self.deploypath, log_file, recreate_log=True)
         if returncode:
             raise RuntimeError(_('Package building {} failed').format(pname))
+        else:
+            logging.info(_('Package {} successfully builded').format(pname))
 
     def login(self, boot=False, bind=[]):
         self.bind_directories
