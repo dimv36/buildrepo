@@ -325,7 +325,7 @@ class NSPContainer:
         if not nspawn_bin:
             exit_with_error(_('systemd-nspawn does not found'))
         nspawn_args = [nspawn_bin, '-D', container_path,
-                       '-M', self.__name, '-E', 'LC_ALL=C']
+                       '-E', 'LC_ALL=C']
         for src, dstinfo in self.bind_directories.items():
             dst, mode = dstinfo
             if mode == 'ro':
