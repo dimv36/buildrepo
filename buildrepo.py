@@ -498,13 +498,13 @@ class NSPContainer:
                 hostname_conf.write(self.name)
             # Copy chroot helper to container
             dst = os.path.join(dist_chroot_dir, 'srv', 'chroot-helper.sh')
-            logging.info(_('Copy chroot helper script ...'))
+            logging.info(_('Copying chroot helper script ...'))
             shutil.copy(self.__conf.chroot_helper, dst)
             os.chmod(dst, 0o755)
             # Creates builder
             build_user = self.__dist_info.get('build-user')
-            logging.info(_('Create user {} in chroot {} ...').format(build_user, self.name))
-            returncode = self._exec_nspawn(['adduser', build_user,
+            logging.info(_('Creating user {} in chroot {} ...').format(build_user, self.name))
+            returncode = self._exec_nspawn(['/sbin/adduser', build_user,
                                             '--disabled-password', '--gecos', 'chroot-builder'],
                                            dist_chroot_dir, logpath)
             if returncode:
