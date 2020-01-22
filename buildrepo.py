@@ -1466,7 +1466,7 @@ class BuildCmd(BaseCommand):
             missing_binaries = 0
             for binary in dscfile.binaries:
                 # For each binary in list search in repository
-                deb_re = os.path.join(self._conf.repodirpath, '{}_{}*.deb'.format(binary, pversion))
+                deb_re = os.path.join(self._conf.repodirpath, '{}_*{}*.deb'.format(binary, pversion))
                 if not len(glob.glob(deb_re)):
                     need_rebuild = True
                     missing_binaries += 1
