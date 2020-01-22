@@ -1460,19 +1460,23 @@ class BuildCmd(BaseCommand):
         # Force rebuilding?
         if package in force_rebuild_list:
             return (True, dscfilepath)
-        # Opens dscfile, read all filenames for it
+        # Open dscfile, read all filenames for it
         try:
             dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
-            missing_binaries = 0
+            missing_binaries = []
             for binary in dscfile.binaries:
                 # For each binary in list search in repository
                 deb_re = os.path.join(self._conf.repodirpath, '{}_*{}*.deb'.format(binary, pversion))
                 if not len(glob.glob(deb_re)):
                     need_rebuild = True
-                    missing_binaries += 1
+                    missing_binaries.append(binary)
             # One of binaries removed?
             if need_rebuild and not len(dscfile.binaries) == missing_binaries:
-                logging.info(_('Source package {} will be rebuilded due to missing binaries').format(package))
+                if sorted(dscfile.binaries) == sorted(missing_binaries):
+                    logging.info(_('Source package {} will be builded').format(package))
+                else:
+                    logging.info(_('Source package {} will be {} due to missing binaries: {}').format(
+                        package, ', '.join(missing_binaries)))
             elif not need_rebuild:
                 logging.info(_('Package {} already builded, skipped').format(
                     '{} = {}'.format(package, version) if len(version) else package))
@@ -1952,6 +1956,8 @@ class ChrootLoginCmd(BaseCommand):
             else:
                 exit_with_error(_('Could not login to container {}: does not deployed').format(nsconainer.name))
         try:
+            # Form bind arg for binding src directory
+            bind.append('{}:/srv/src'.format(self._conf.srcdirpath))
             nsconainer.login(boot, bind)
         except Exception as e:
             exit_with_error(e)
