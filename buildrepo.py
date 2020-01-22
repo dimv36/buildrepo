@@ -699,6 +699,7 @@ class DependencyFinder:
                 item = None
                 resolved = None
                 depdest = None
+                unresolved = []
                 for dpitem in dep:
                     dpitem = tuple(dpitem)
                     seen_item = (dpitem, required_by,)
@@ -709,8 +710,8 @@ class DependencyFinder:
                     if depdest == PackageType.PACKAGE_NOT_FOUND:
                         i = (depdest, pdstinfo, resolved, required_by)
                         assert (len(i) == 4), (item, len(i))
-                        if i not in s:
-                            s.append(i)
+                        if i not in unresolved:
+                            unresolved.append(i)
                     else:
                         item = (depdest, pdstinfo, resolved, required_by)
                         if item not in s:
@@ -718,7 +719,12 @@ class DependencyFinder:
                             s.append(item)
                             if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
                                 self.__recurse_deps(s, dpitem)
+                        unresolved.clear()
                         break
+                if len(unresolved):
+                    for item in unresolved:
+                        if item not in s:
+                            s.append(item)
                 if self.__flags & DependencyFinder.FLAG_FINDER_MAIN and not item:
                     alt_dep_full = ' | '.join(form_dependency(d) for d in dep)
                     # Can't resolve alternative dependency, got the last
@@ -1603,7 +1609,23 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         glob_re = os.path.join(self._conf.srcdirpath, '{}_{}*.dsc'.format(source, version))
         dscfilepath = glob.glob(glob_re)
         if not len(dscfilepath):
-            exit_with_error(_('Failed to find sources via regexp {}').format(glob_re))
+            # Failed, e.g. if binary version is not the same as source version
+            glob_re = os.path.join(self._conf.srcdirpath, '{}_*.dsc'.format(source))
+            dscfiles = glob.glob(glob_re)
+            founded = None
+            for dscfile in dscfiles:
+                base = os.path.basename(dscfile)
+                m = re.match(r'.*_(?P<pversion>.*).dsc', base)
+                if m:
+                    pversion = m.group('pversion')
+                    if pversion in version:
+                        # Founded, break
+                        founded = dscfile
+                        break
+            if not founded:
+                exit_with_error(_('Failed to find sources via regexp {}').format(glob_re))
+            else:
+                dscfilepath = [founded]
         dscfilepath = dscfilepath[0]
         dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
         return tuple(dscfile.filelist + [os.path.basename(dscfilepath)])
