@@ -441,9 +441,10 @@ class NSPContainer:
                 exit_with_error(_('Failed to find debootrap'))
             # We suppose, that OS can be bootstraped from first mirror
             mirrors = self.__dist_info.get('mirrors')
+            components = self.__dists.info.get('components', self.DEFAULT_DIST_COMPONENTS)
             debootstrap_args = [debootstrap_bin,
                                 '--no-check-gpg', '--verbose', '--variant=minbase',
-                                '--components={}'.format(','.join(self.__dist_info.get('components'))),
+                                '--components={}'.format(','.join(components)),
                                 self.__name, dist_chroot_dir,
                                 mirrors[0]]
             chroot_script = self.__dist_info.get('chroot-script')
@@ -465,7 +466,6 @@ class NSPContainer:
                 # Our building repository
                 apt_sources.write('deb file:///srv repo/\n')
                 mirror_num = self._FIRST_MIRROR
-                components = ' '.join(self.__dist_info.get('components'))
                 for url in mirrors:
                     if url.startswith('file://'):
                         url = os.path.join('srv', 'mirrors', 'mirror{}'.format(mirror_num))
@@ -673,6 +673,8 @@ class DependencyFinder:
                 for binary in filtered_binaries:
                     dependency = [binary]
                     if dependency not in deps:
+                        logging.debug(_('Adding dependency {} as builded from the same source ...').format(
+                            dependency))
                         deps.append(dependency)
         for dep in deps:
             if len(dep) == 1:
