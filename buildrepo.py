@@ -504,7 +504,7 @@ class NSPContainer:
             # Creates builder
             build_user = self.__dist_info.get('build-user')
             logging.info(_('Creating user {} in chroot {} ...').format(build_user, self.name))
-            returncode = self._exec_nspawn(['/sbin/adduser', build_user,
+            returncode = self._exec_nspawn(['/usr/sbin/adduser', build_user,
                                             '--disabled-password', '--gecos', 'chroot-builder'],
                                            dist_chroot_dir, logpath)
             if returncode:
