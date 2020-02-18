@@ -440,7 +440,7 @@ class NSPContainer:
             if not debootstrap_bin:
                 exit_with_error(_('Failed to find debootrap'))
             # We suppose, that OS can be bootstraped from first mirror
-            mirrors = self.__dist_info.get('mirrors')
+            mirrors = self.__dists.info.get('mirrors')
             components = self.__dists.info.get('components', self.DEFAULT_DIST_COMPONENTS)
             debootstrap_args = [debootstrap_bin,
                                 '--no-check-gpg', '--verbose', '--variant=minbase',
