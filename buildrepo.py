@@ -466,6 +466,7 @@ class NSPContainer:
                 # Our building repository
                 apt_sources.write('deb file:///srv repo/\n')
                 mirror_num = self._FIRST_MIRROR
+                components = ' '.join(components)
                 for url in mirrors:
                     if url.startswith('file://'):
                         url = os.path.join('srv', 'mirrors', 'mirror{}'.format(mirror_num))
@@ -504,7 +505,7 @@ class NSPContainer:
             # Creates builder
             build_user = self.__dist_info.get('build-user')
             logging.info(_('Creating user {} in chroot {} ...').format(build_user, self.name))
-            returncode = self._exec_nspawn(['/sbin/adduser', build_user,
+            returncode = self._exec_nspawn(['/usr/sbin/adduser', build_user,
                                             '--disabled-password', '--gecos', 'chroot-builder'],
                                            dist_chroot_dir, logpath)
             if returncode:
@@ -1449,11 +1450,15 @@ class BuildCmd(BaseCommand):
 
     def __check_if_build_required(self, package, version, force_rebuild_list):
         if len(version):
-            glob_re = '{}_{}.dsc'.format(package, version)
+            source = '{}_{}.dsc'.format(package, version)
+            source = os.path.join(self._conf.srcdirpath, source)
+            if not os.path.exists(source):
+                exit_with_error(_('Could not find source of package {} = {}').format(package, version))
+            dsc_sources = [source]
         else:
             glob_re = '{}_*.dsc'.format(package)
-        glob_re = os.path.join(self._conf.srcdirpath, glob_re)
-        dsc_sources = glob.glob(glob_re)
+            glob_re = os.path.join(self._conf.srcdirpath, glob_re)
+            dsc_sources = glob.glob(glob_re)
         if len(dsc_sources) > 1:
             re_regexp = r'.*_(?P<version>.*)\.dsc'
             versions = [re.match(re_regexp, dsc).group('version') for dsc in dsc_sources]
