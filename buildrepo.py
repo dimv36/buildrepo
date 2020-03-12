@@ -1273,9 +1273,10 @@ class SourcesList:
 
     @property
     def build_list_str(self):
-        return '\n'.join(p[self.SL_PKGNAME]
+        indent = ' ' * 10
+        return '\n'.join(indent + p[self.SL_PKGNAME]
                          if not len(p[self.SL_PKGVERSION]) else
-                         '{} = {}'.format(p[self.SL_PKGNAME], p[self.SL_PKGVERSION])
+                         indent + '{} = {}'.format(p[self.SL_PKGNAME], p[self.SL_PKGVERSION])
                          for p in self.__build_list)
 
 
