@@ -28,6 +28,9 @@ if not sys.version_info >= (3, 5,):
 # gettext
 _ = gettext.gettext
 
+# Script version
+__version__ = '1.0'
+
 # Disable warnings
 warnings.filterwarnings('ignore')
 
@@ -1577,6 +1580,8 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             self.__dev_packages_suffixes = [item.strip() for item in self.__dev_packages_suffixes.split(',')]
         logging.info(_('Using {} rule for packages for 2nd disk').format(
             ', '.join(self.__dev_packages_suffixes)))
+        self.__drop_dbg_packages = self._conf.parser.getboolean(_RepoAnalyzerCmd.alias,
+                                                                'drop-dbg-packages', fallback=False)
 
     def __parse_white_list(self, white_list_path):
         i = 1
@@ -1637,6 +1642,13 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         dscfilepath = dscfilepath[0]
         dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
         return tuple(dscfile.filelist + [os.path.basename(dscfilepath)])
+
+    def __skip_dbg_package(self, pkgname):
+        if not self.__drop_dbg_packages:
+            return False
+        if pkgname.endswith('-dbgsym') or pkgname.endswith('-dbg'):
+            return True
+        return False
 
     def run(self):
         def log_stage(msg):
@@ -1702,6 +1714,9 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         dev_packages = sorted([p for p in (set(dev_packages) - set(target_packages))])
         for devpkg in dev_packages:
             logging.info(_('Processing {} ...').format(devpkg))
+            if self.__skip_dbg_package(devpkg):
+                logging.warning(_('Skipping {} because skipping packages with debug info is on').format(devpkg))
+                continue
             deps = self._get_depends_for_package(devpkg, flags=DependencyFinder.FLAG_FINDER_DEV)
             unresolve = [d for d in deps if d[DependencyFinder.DF_DEST] == PackageType.PACKAGE_NOT_FOUND]
             if len(unresolve):
@@ -2203,7 +2218,8 @@ def register_atexit_callbacks():
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=_('Repository builder'))
+    parser.add_argument('--version', action='version', version=__version__)
     subparsers = parser.add_subparsers(dest='command')
     cmdmap = available_commands()
 
