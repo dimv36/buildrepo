@@ -920,6 +920,7 @@ class DebianIsoRepository(_BaseIsoReposisory):
         isopath = os.path.join(self._conf.isodirpath, isoname)
         iso_label = '{repo} {version}'.format(repo=self.__name, version=self._conf.repoversion)
         self._make_iso(isopath, self.__name, iso_label, touch_dt)
+        return isopath
 
 
 class SourceIso(_BaseIsoReposisory):
@@ -967,6 +968,7 @@ class SourceIso(_BaseIsoReposisory):
         isopath = os.path.join(self._conf.isodirpath, isoname)
         label = '{} {} (sources)'.format(self._conf.reponame, self._conf.repoversion)
         self._make_iso(isopath, self._conf.reponame, label, touch_dt)
+        return isopath
 
 
 class RepositoryCache:
@@ -1605,6 +1607,8 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                                                                 'drop-dbg-packages', fallback=False)
         # touch dt
         self.__touch_dt = self.__get_touch_dt()
+        # hashsums
+        self.__hashinfo = self.__parse_hash_info()
 
     def __parse_white_list(self, white_list_path):
         i = 1
@@ -1653,6 +1657,17 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         logging.info(_('Using timestamp {} for repositories ...').format(dtstr))
         return dt
 
+    def __parse_hash_info(self):
+        hashinfo = {}
+        if not self._conf.parser.has_section('hashsums'):
+            return hashinfo
+        for key, binary in self._conf.parser.items('hashsums'):
+            binpath = shutil.which(binary)
+            if binpath is None:
+                exit_with_error(_('Failed to find binary \'{}\' in PATH').format(binary))
+            hashinfo[key] = binpath
+        return hashinfo
+
     def __sources(self, pkg, version):
         source = self._builded_cache.source_package(pkg, version)
         if source is None:
@@ -1688,13 +1703,35 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             return True
         return False
 
-    def run(self):
-        def log_stage(msg):
-            logging.info('=' * len(msg))
-            logging.info(msg)
-            logging.info('=' * len(msg))
+    def __log_stage(self, msg):
+        logging.info('=' * len(msg))
+        logging.info(msg)
+        logging.info('=' * len(msg))
 
-        log_stage(_('Processing target repository ...'))
+    def __generate_iso_hash_sums(self, isopaths):
+        if not len(self.__hashinfo):
+            return
+        with change_directory(self._conf.isodirpath):
+            for hashalgo, binary in self.__hashinfo.items():
+                sumspath = '{}_{}_{}_{}.{}.sums'.format(self._conf.reponame,
+                                                        self._conf.repoversion,
+                                                        self._conf.distro,
+                                                        self.__touch_dt.strftime('%Y-%m-%d'),
+                                                        hashalgo)
+                hashfile = os.path.join(self._conf.isodirpath, sumspath)
+                fp = open(hashfile, mode='a')
+                self.__log_stage(_('Generating hash sums ({}) ...').format(hashalgo))
+                for isopath in isopaths:
+                    basename = os.path.basename(isopath)
+                    with subprocess.Popen((binary, basename),
+                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                          universal_newlines=True) as proc:
+                        out, err = proc.communicate()
+                        fp.write(out)
+                logging.info(_('Hash sums (algo {}) saved to \'{}\'').format(hashalgo, hashfile))
+
+    def run(self):
+        self.__log_stage(_('Processing target repository ...'))
         target_builded_deps = set()
         sources = dict()
         tmpdirpath = TemporaryDirManager.instance().create()
@@ -1739,7 +1776,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                     shutil.copyfile(f, dst)
                 except Exception as e:
                     exit_with_error(e)
-        log_stage(_('Processing dev repository ...'))
+        self.__log_stage(_('Processing dev repository ...'))
         # Determine packages for second disk
         dev_packages = []
         for f in os.listdir(self._conf.repodirpath):
@@ -1804,18 +1841,23 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                     shutil.copyfile(src, dst)
                 except Exception as e:
                     exit_with_error(e)
-        log_stage(_('Making ISO repositories ...'))
+        self.__log_stage(_('Making ISO repositories ...'))
         # Creates reprepro images for binary repositories (main и dev)
+        isopaths = []
         for items in ((frepodirpath, False),
                       (frepodevdirpath, True)):
             pkgpath, is_dev = items
             iso_maker = DebianIsoRepository(tmpdirpath, is_dev)
-            iso_maker.create(pkgpath, self.__touch_dt)
+            path = iso_maker.create(pkgpath, self.__touch_dt)
+            isopaths.append(path)
         # Creates sources ISO disk
         sources_iso_tmpdir = os.path.join(tmpdirpath, '{}_src_iso'.format(self._conf.reponame))
         os.makedirs(sources_iso_tmpdir, exist_ok=True)
         sources_iso = SourceIso(sources_iso_tmpdir)
-        sources_iso.create(fsrcdirpath, self.__sources_include, self.__touch_dt)
+        source_iso_path = sources_iso.create(fsrcdirpath, self.__sources_include, self.__touch_dt)
+        # Generate hash for ISO
+        isopaths.append(source_iso_path)
+        self.__generate_iso_hash_sums(isopaths)
 
 
 class MakePackageCacheCmd(BaseCommand):
