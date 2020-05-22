@@ -787,8 +787,14 @@ class _BaseIsoReposisory:
             exit_with_error(_('Failed to find {} binary').format('xorrisofs'))
 
     @staticmethod
-    def now():
-        return datetime.datetime.now().strftime('%Y-%m-%d')
+    def fmtdate(dt, buildinfo=False):
+        if buildinfo:
+            return dt.strftime('%')
+        return dt.strftime('%Y-%m-%d')
+
+    @staticmethod
+    def fmttouch(dt):
+        return dt.strftime('%Y%m%d%H%M')
 
     def _iso_type(self):
         raise NotImplementedError()
@@ -815,9 +821,18 @@ class _BaseIsoReposisory:
             logging.error(_('Out was: \n{}'.format(out)))
         return proc.returncode == 0
 
-    def _make_iso(self, isopath, target, label):
+    def _touch_at(self, touch_dt):
+        find_bin = shutil.which('find')
+        if not self._run_command_log([find_bin, self.repodir,
+                                      '-exec', 'touch', '-t',
+                                      self.fmttouch(touch_dt), '{}', ';']):
+            exit_with_error(_('Touching failed'))
+
+    def _make_iso(self, isopath, target, label, touch_dt):
         with change_directory(os.path.join(self.repodir, '..')):
             logging.info(_('Building {} {} for {} ...').format(self._iso_type(), isopath, target))
+            # Hook for creation time
+            self._touch_at(touch_dt)
             if not self._run_command_log([self.__xorrisofs_bin, '-r', '-J', '-joliet-long',
                                           '-V', label, '-o', isopath, self.repodir]):
                 exit_with_error(_('Failed to create ISO image'))
@@ -881,7 +896,7 @@ class DebianIsoRepository(_BaseIsoReposisory):
                                                                              distro=self._conf.distro,
                                                                              arch=self.__arch))
 
-    def create(self, packagesdir):
+    def create(self, packagesdir, touch_dt):
         with change_directory(self.repodir):
             logging.info(_('Creating repository for {} via reprepro ...').format(self.__name))
             for package in glob.glob('{}/*.deb'.format(packagesdir)):
@@ -896,14 +911,15 @@ class DebianIsoRepository(_BaseIsoReposisory):
                                                                                  version=self._conf.repoversion,
                                                                                  distro=self._conf.distro,
                                                                                  arch=self.__arch,
-                                                                                 date=self.now()))
+                                                                                 date=self.fmtdate(touch_dt, True)))
+
         isoname = '{repo}_{version}_{distro}_{date}.iso'.format(repo=self.__name,
                                                                 version=self._conf.repoversion,
                                                                 distro=self._conf.distro,
-                                                                date=self.now())
+                                                                date=self.fmtdate(touch_dt))
         isopath = os.path.join(self._conf.isodirpath, isoname)
         iso_label = '{repo} {version}'.format(repo=self.__name, version=self._conf.repoversion)
-        self._make_iso(isopath, self.__name, iso_label)
+        self._make_iso(isopath, self.__name, iso_label, touch_dt)
 
 
 class SourceIso(_BaseIsoReposisory):
@@ -916,7 +932,7 @@ class SourceIso(_BaseIsoReposisory):
     def _iso_type(self):
         return 'sources iso'
 
-    def create(self, fsrcdirpath, sources_include):
+    def create(self, fsrcdirpath, sources_include, touch_dt):
         # First, creates directory for ISO
         os.makedirs(self.repodir, exist_ok=True)
         # Copy sources
@@ -947,10 +963,10 @@ class SourceIso(_BaseIsoReposisory):
         isoname = 'sources-{}_{}_{}_{}.iso'.format(self._conf.reponame,
                                                    self._conf.repoversion,
                                                    self._conf.distro,
-                                                   self.now())
+                                                   self.fmtdate(touch_dt))
         isopath = os.path.join(self._conf.isodirpath, isoname)
         label = '{} {} (sources)'.format(self._conf.reponame, self._conf.repoversion)
-        self._make_iso(isopath, self._conf.reponame, label)
+        self._make_iso(isopath, self._conf.reponame, label, touch_dt)
 
 
 class RepositoryCache:
@@ -1552,9 +1568,11 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
     cmdhelp = _('Creates repositories (main, devel and source) in reprepro format')
     required_binaries = ['reprepro', 'xorrisofs']
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
+    _TOUCH_DT_FMT = '%d.%m.%Y %H:%M:%S'
 
     def __init__(self, conf_path):
         super().__init__(conf_path)
+        # Sources
         sources_include = self._conf.parser.get(MakeRepoCmd.alias, 'source-include', fallback=[])
         if isinstance(sources_include, str):
             sources_include = sources_include.split(',')
@@ -1567,21 +1585,26 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                 exit_with_error(_('File {} does not exists').format(abspath))
         self.__sources_include = sources
         self.__packages = {}
+        # white list
         white_list = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'white-list', fallback=None)
-        self.__dev_packages_suffixes = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'dev-package-suffixes',
-                                                             fallback=MakeRepoCmd._DEFAULT_DEV_PACKAGES_SUFFIXES)
         if not white_list:
             exit_with_error(_('White list does not specified in {}').format(self._conf.conf_path))
         white_list = os.path.abspath(white_list)
         if not os.path.exists(white_list):
             exit_with_error(_('File {} does not exist').format(white_list))
         self.__parse_white_list(white_list)
+        # dev packages suffixes
+        self.__dev_packages_suffixes = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'dev-package-suffixes',
+                                                             fallback=MakeRepoCmd._DEFAULT_DEV_PACKAGES_SUFFIXES)
         if isinstance(self.__dev_packages_suffixes, str):
             self.__dev_packages_suffixes = [item.strip() for item in self.__dev_packages_suffixes.split(',')]
         logging.info(_('Using {} rule for packages for 2nd disk').format(
             ', '.join(self.__dev_packages_suffixes)))
+        # drop dbg packages
         self.__drop_dbg_packages = self._conf.parser.getboolean(_RepoAnalyzerCmd.alias,
                                                                 'drop-dbg-packages', fallback=False)
+        # touch dt
+        self.__touch_dt = self.__get_touch_dt()
 
     def __parse_white_list(self, white_list_path):
         i = 1
@@ -1614,6 +1637,21 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                 continue
             if (all_pkgs & set(packages)):
                 exit_with_error(_('Intersection is found in lists'))
+
+    def __get_touch_dt(self):
+        from datetime import datetime
+        value = self._conf.parser.get(_RepoAnalyzerCmd.alias,
+                                      'creation-timestamp', fallback=None)
+        if value is not None:
+            try:
+                dt = datetime.strptime(value, self._TOUCH_DT_FMT)
+            except ValueError:
+                exit_with_error(_('Incorrect timestamp: \'{}\'').format(value))
+        else:
+            dt = datetime.now()
+        dtstr = datetime.strftime(dt, self._TOUCH_DT_FMT)
+        logging.info(_('Using timestamp {} for repositories ...').format(dtstr))
+        return dt
 
     def __sources(self, pkg, version):
         source = self._builded_cache.source_package(pkg, version)
@@ -1772,12 +1810,12 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                       (frepodevdirpath, True)):
             pkgpath, is_dev = items
             iso_maker = DebianIsoRepository(tmpdirpath, is_dev)
-            iso_maker.create(pkgpath)
+            iso_maker.create(pkgpath, self.__touch_dt)
         # Creates sources ISO disk
         sources_iso_tmpdir = os.path.join(tmpdirpath, '{}_src_iso'.format(self._conf.reponame))
         os.makedirs(sources_iso_tmpdir, exist_ok=True)
         sources_iso = SourceIso(sources_iso_tmpdir)
-        sources_iso.create(fsrcdirpath, self.__sources_include)
+        sources_iso.create(fsrcdirpath, self.__sources_include, self.__touch_dt)
 
 
 class MakePackageCacheCmd(BaseCommand):
