@@ -132,10 +132,10 @@ class Configuration:
     def __base_init(self):
         if self._inited:
             return
-        for subdir in ['src', 'repo', 'logs', 'cache', 'chroots']:
+        for subdir in ['src', 'repo', 'logs', 'cache', 'chroots', 'iso']:
             setattr(self, '{}dirpath'.format(subdir),
                     os.path.join(self.root, subdir, self.distro or '', self.reponame))
-        for subdir in ['chrootsinst', 'tmp', 'iso']:
+        for subdir in ['chrootsinst', 'tmp']:
             setattr(self, '{}dirpath'.format(subdir), os.path.join(self.root, subdir))
         self.__init_logger()
         # Initialize temporary dir manager
