@@ -1727,7 +1727,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                                           universal_newlines=True) as proc:
                         out, err = proc.communicate()
                         fp.write(out)
-                logging.info(_('Hash sums (algo {}) saved to \'{}\'').format(hashalgo, hashfile))
+                logging.info(_('Hash sums (algo {}) saved to {}').format(hashalgo, hashfile))
 
     def run(self):
         self.__log_stage(_('Processing target repository ...'))
