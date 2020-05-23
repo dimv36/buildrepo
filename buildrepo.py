@@ -1643,17 +1643,16 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                 exit_with_error(_('Intersection is found in lists'))
 
     def __get_touch_dt(self):
-        from datetime import datetime
         value = self._conf.parser.get(_RepoAnalyzerCmd.alias,
                                       'creation-timestamp', fallback=None)
         if value is not None:
             try:
-                dt = datetime.strptime(value, self._TOUCH_DT_FMT)
+                dt = datetime.datetime.strptime(value, self._TOUCH_DT_FMT)
             except ValueError:
                 exit_with_error(_('Incorrect timestamp: \'{}\'').format(value))
         else:
-            dt = datetime.now()
-        dtstr = datetime.strftime(dt, self._TOUCH_DT_FMT)
+            dt = datetime.datetime.now()
+        dtstr = datetime.datetime.strftime(dt, self._TOUCH_DT_FMT)
         logging.info(_('Using timestamp {} for repositories ...').format(dtstr))
         return dt
 
