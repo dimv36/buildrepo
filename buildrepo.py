@@ -150,6 +150,16 @@ class Configuration:
                 return False
         return True
 
+    @property
+    def missing_directories(self):
+        missing = []
+        dir_attrs = [attr for attr in dir(self) if attr.endswith('dirpath')]
+        for attr in dir_attrs:
+            val = getattr(self, attr)
+            if not os.path.exists(val):
+                missing.append(val)
+        return missing
+
     def __init_logger(self):
         if os.path.exists(self.logsdirpath):
             logname = os.path.join(self.root, 'build-{}.log'.format(self.reponame))
@@ -1321,6 +1331,8 @@ class BaseCommand:
             exit_with_error(_('Must be run as superuser'))
         self.__check_required_binaries()
         if not self.cmd == 'init' and not self._conf.directories_created():
+            for missing in self._conf.missing_directories:
+                logging.error(_('Directory {} does not created').format(missing))
             exit_with_error(_('Required directories not created. '
                               'Please, run `{} init` first.').format(sys.argv[0]))
 
