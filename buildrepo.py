@@ -1333,7 +1333,7 @@ class BaseCommand:
         if not self.cmd == 'init' and not self._conf.directories_created():
             for missing in self._conf.missing_directories:
                 logging.error(_('Directory {} does not created').format(missing))
-            exit_with_error(_('Required directories not created. '
+            exit_with_error(_('Required directories is not created. '
                               'Please, run `{} init` first.').format(sys.argv[0]))
 
     def __check_required_binaries(self):
