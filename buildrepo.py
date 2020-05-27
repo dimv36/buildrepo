@@ -1616,7 +1616,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             ', '.join(self.__dev_packages_suffixes)))
         # drop dbg packages
         self.__drop_dbg_packages = self._conf.parser.getboolean(_RepoAnalyzerCmd.alias,
-                                                                'drop-dbg-packages', fallback=False)
+                                                                'drop-dbg-packages', fallback=True)
         # touch dt
         self.__touch_dt = self.__get_touch_dt()
         # hashsums
