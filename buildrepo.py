@@ -1196,7 +1196,7 @@ class RepositoryCache:
         for pkginfo in self.__packages:
             pkgname, pkgver = pkginfo.get('package'), pkginfo.get('version')
             # NB: Version epoch hack
-            # e.g.: 1:3.1+dfsg-2 и 3.1+dfsg-2
+            # e.g.: 1:3.1+dfsg-2 is the same as 3.1+dfsg-2
             if binary_package == pkgname and version in pkgver:
                 # If source is None, source is equal as Package field
                 return pkginfo.get('source') or binary_package
@@ -1582,7 +1582,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
     cmdhelp = _('Creates repositories (main, devel and source) in reprepro format')
     required_binaries = ['reprepro', 'xorrisofs']
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
-    _TOUCH_DT_FMT = '%d.%m.%Y %H:%M:%S'
+    _TOUCH_DT_FMT = '%d.%m.%Y %H:%M'
 
     def __init__(self, conf_path):
         super().__init__(conf_path)
@@ -1730,7 +1730,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                                                         self.__touch_dt.strftime('%Y-%m-%d'),
                                                         hashalgo)
                 hashfile = os.path.join(self._conf.isodirpath, sumspath)
-                fp = open(hashfile, mode='a')
+                fp = open(hashfile, mode='w')
                 self.__log_stage(_('Generating hash sums ({}) ...').format(hashalgo))
                 for isopath in isopaths:
                     basename = os.path.basename(isopath)
