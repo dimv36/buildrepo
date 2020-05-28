@@ -799,7 +799,7 @@ class _BaseIsoReposisory:
     @staticmethod
     def fmtdate(dt, buildinfo=False):
         if buildinfo:
-            return dt.strftime('%')
+            return dt.strftime('%d.%m.%Y %H:%M')
         return dt.strftime('%Y-%m-%d')
 
     @staticmethod
