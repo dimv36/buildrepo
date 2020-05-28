@@ -1582,7 +1582,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
     cmdhelp = _('Creates repositories (main, devel and source) in reprepro format')
     required_binaries = ['reprepro', 'xorrisofs']
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
-    _TOUCH_DT_FMT = '%d.%m.%Y %H:%M:%S'
+    _TOUCH_DT_FMT = '%d.%m.%Y %H:%M'
 
     def __init__(self, conf_path):
         super().__init__(conf_path)
