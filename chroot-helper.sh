@@ -3,12 +3,14 @@
 cd `dirname $0`
 
 source environment
-source runtime-environment
+
 
 function help()
 {
-	echo $0 "<dsc>"
+	echo $0 "build <dsc>"
+	echo $0 "refresh <repo-path>"
 }
+
 
 function exec_cmd_or_fail()
 {
@@ -21,6 +23,7 @@ function exec_cmd_or_fail()
 		exit $retcode
 	fi
 }
+
 
 function build_package()
 {
@@ -40,14 +43,87 @@ function build_package()
 	fi
 }
 
+
+function refresh_repo()
+{
+	REPO=$1
+	dpkg-scanpackages --multiversion 2>/dev/null $REPO > $REPO/Packages
+}
+
+
+function cmd_build
+{
+	source runtime-environment
+
+	DSCFILE=$1
+
+	# Determine dirname of DSCFILE
+	pushd `dirname $DSCFILE` &> /dev/null
+
+	# Chown to BUILDUSER
+	chmod u+rw *
+	chown -R $BUILDUSER:root ./
+
+	DSCFILE=`basename $DSCFILE`
+	BUILDDIR="${DSCFILE%.*}"_build
+
+	# Check, if BUILDDIR exists
+	if [[ -d "$BUILDDIR" ]]
+	then
+		rm -fr $BUILDDIR &> /dev/null
+	fi
+
+	# Update apt cache
+	exec_cmd_or_fail "apt-get update"
+
+	# Next, extract sources
+	exec_cmd_or_fail "sudo -u $BUILDUSER dpkg-source -x $DSCFILE $BUILDDIR"
+
+	# Enter to BUILDDIR
+	pushd $BUILDDIR &> /dev/null
+
+	# Install build-depends via apt
+	exec_cmd_or_fail "apt-get build-dep ./"
+
+	# Try to build package
+	exec_cmd_or_fail "sudo -u $BUILDUSER DEB_BUILD_OPTIONS=\"$DEB_BUILD_OPTIONS\" dpkg-buildpackage"
+
+	popd &> /dev/null # BUILDDIR
+
+	rm -fr $BUILDDIR &> /dev/null
+
+	# Move binaries into repo
+	mv *.deb ../repo
+
+	popd &> /dev/null # Dir with sources
+
+	# Generate packages list
+	refresh_repo repo
+
+	exit 0
+}
+
+
+function cmd_refresh
+{
+	REPO_PATH=$1
+
+	pushd $REPO_PATH &> /dev/null
+
+	# Move to parent dir
+	cd ..
+	BASENAME=`basename $REPO_PATH`
+
+	# Generate packages list
+	refresh_repo $BASENAME
+
+	popd &> /dev/null
+}
+
+
 ##############################
 #         main               #
 ##############################
-if [[ "$#" -ne "1" ]]
-then
-	help
-	exit 0
-fi
 
 IN_CHROOT=`echo $container`
 if [[ "x$IN_CHROOT" == "x" ]]
@@ -56,49 +132,23 @@ then
 	exit 1
 fi
 
-DSCFILE=$1
-
-# Determine dirname of DSCFILE
-pushd `dirname $DSCFILE` &> /dev/null
-
-# Chown to BUILDUSER
-chmod u+rw *
-chown -R $BUILDUSER:root ./
-
-DSCFILE=`basename $DSCFILE`
-BUILDDIR="${DSCFILE%.*}"_build
-
-# Check, if BUILDDIR exists
-if [[ -d "$BUILDDIR" ]]
+if [[ "$#" -ne "2" ]]
 then
-	rm -fr $BUILDDIR &> /dev/null
+	help
+	exit 0
 fi
 
-# Update apt cache
-exec_cmd_or_fail "apt-get update"
+command=$1
 
-# Next, extract sources
-exec_cmd_or_fail "sudo -u $BUILDUSER dpkg-source -x $DSCFILE $BUILDDIR"
-
-# Enter to BUILDDIR
-pushd $BUILDDIR &> /dev/null
-
-# Install build-depends via apt
-exec_cmd_or_fail "apt-get build-dep ./"
-
-# Try to build package
-exec_cmd_or_fail "sudo -u $BUILDUSER DEB_BUILD_OPTIONS=\"$DEB_BUILD_OPTIONS\" dpkg-buildpackage"
-
-popd &> /dev/null # BUILDDIR
-
-rm -fr $BUILDDIR &> /dev/null
-
-# Move binaries into repo
-mv *.deb ../repo
-
-popd &> /dev/null # Dir with sources
-
-# Generate packages list
-dpkg-scanpackages --multiversion 2>/dev/null repo > repo/Packages
-
-exit 0
+case "$command" in
+	build)
+		cmd_build $2
+	;;
+	refresh)
+		cmd_refresh $2
+	;;
+	*)
+		help
+		exit 0
+	;;
+esac

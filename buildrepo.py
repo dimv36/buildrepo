@@ -132,7 +132,7 @@ class Configuration:
     def __base_init(self):
         if self._inited:
             return
-        for subdir in ['src', 'repo', 'logs', 'cache', 'chroots', 'iso']:
+        for subdir in ['src', 'repo', 'logs', 'cache', 'chroots', 'iso', 'ospkgs']:
             setattr(self, '{}dirpath'.format(subdir),
                     os.path.join(self.root, subdir, self.distro or '', self.reponame))
         for subdir in ['chrootsinst', 'tmp']:
@@ -271,7 +271,8 @@ class NSPContainer:
     def bind_directories(self):
         if not self.__bind_directories:
             # Our build repository
-            bind_directories = {self.__conf.repodirpath: ('/srv/repo', 'rw')}
+            bind_directories = {self.__conf.repodirpath: ('/srv/repo', 'rw'),
+                                self.__conf.ospkgsdirpath: ('/srv/ospkgs', 'rw')}
             mirror_num = self._FIRST_MIRROR
             for mirror in self.__dist_info.get('mirrors'):
                 if mirror.startswith('file://'):
@@ -417,7 +418,7 @@ class NSPContainer:
         # Generate args for package building
         logging.info(_('Package building {}-{} ...'.format(pname, pversion)))
         chroot_helper_path = os.path.join('/srv', os.path.basename(self.__conf.chroot_helper))
-        returncode = self._exec_nspawn(['--chdir=/srv', chroot_helper_path, dsc_file_path],
+        returncode = self._exec_nspawn(['--chdir=/srv', chroot_helper_path, 'build', dsc_file_path],
                                        self.deploypath, log_file, recreate_log=True)
         if returncode:
             raise RuntimeError(_('Package building {} failed').format(pname))
@@ -438,6 +439,14 @@ class NSPContainer:
             nspawn_args = ['/bin/bash']
         returncode = self._exec_nspawn(nspawn_args, self.deploypath, log_file=None)
         logging.info(_('Container {} finished with exit code {}').format(self.name, returncode))
+
+    def refresh_repo(self, ctype):
+        ctype = PackageType.cache_type_refreshed_map().get(ctype)
+        repo_path = '/srv/ospkgs' if ctype == PackageType.PACKAGE_FROM_OS_NB_REPO else '/srv/repo'
+        chroot_helper_path = os.path.join('/srv', os.path.basename(self.__conf.chroot_helper))
+        returncode = self._exec_nspawn(['--chdir=/srv', chroot_helper_path, 'refresh', repo_path],
+                                       self.deploypath, log_file=None)
+        logging.info(_('Refreshing packages finished with exit code {}').format(returncode))
 
     def create(self):
         def chroot_exclude_filter(tarinfo):
@@ -587,9 +596,10 @@ class PackageType:
     (PACKAGE_BUILDED,
      PACKAGE_FROM_OS_REPO,
      PACKAGE_FROM_EXT_REPO,
+     PACKAGE_FROM_OS_NB_REPO,
      PACKAGE_FROM_OS_DEV_REPO,
      PACKAGE_FROM_EXT_DEV_REPO,
-     PACKAGE_NOT_FOUND) = range(0, 6)
+     PACKAGE_NOT_FOUND) = range(0, 7)
     _CREATED_MAP = None
     _FULL_MAP = None
 
@@ -603,6 +613,7 @@ class PackageType:
         ret = {}
         for attr in ['PACKAGE_FROM_OS_REPO',
                      'PACKAGE_FROM_EXT_REPO',
+                     'PACKAGE_FROM_OS_NB_REPO',
                      'PACKAGE_FROM_OS_DEV_REPO',
                      'PACKAGE_FROM_EXT_DEV_REPO']:
             attrval = getattr(cls, attr)
@@ -619,6 +630,13 @@ class PackageType:
         if not cls._CREATED_MAP:
             cls._CREATED_MAP = cls._cache_type_map(full=False)
         return cls._CREATED_MAP
+
+    @classmethod
+    def cache_type_refreshed_map(cls):
+        return {
+            'os-nb': cls.PACKAGE_FROM_OS_NB_REPO,
+            'builded': cls.PACKAGE_BUILDED
+        }
 
     @classmethod
     def cache_type_full_map(cls):
@@ -1357,17 +1375,21 @@ class _RepoAnalyzerCmd(BaseCommand):
         super().__init__(conf_path)
         self._caches = []
         self._rfcache = RepositoryFullCache()
-        self.__build_cache_of_builded_packages()
+        self.__build_local_caches()
         self._rfcache.load()
         self._depfinder = DependencyFinder(self._rfcache)
         self._builded_cache = self._rfcache.builded_cache
 
-    def __build_cache_of_builded_packages(self):
-        logging.info(_('Building cache for builded packages ...'))
+    def __build_local_caches(self):
+        logging.info(_('Building local caches ...'))
         maker = MakePackageCacheCmd(self._conf.conf_path)
         maker.run(mount_path=self._conf.repodirpath,
                   name='builded',
                   ctype=PackageType.PACKAGE_BUILDED,
+                  info_message=False)
+        maker.run(mount_path=self._conf.ospkgsdirpath,
+                  name='ospkgs',
+                  ctype=PackageType.PACKAGE_FROM_OS_NB_REPO,
                   info_message=False)
 
     def _get_depends_for_package(self, package, exclude_rules=None,
@@ -2231,6 +2253,28 @@ class SourcesSortCmd(BaseCommand):
                 fp.write(self.__format_source(item))
                 fp.write('\n')
         logging.info(_('Ordered sources list is saved to {}').format(sources_list_new))
+
+
+class RefreshPackagesCmd(BaseCommand):
+    cmd = 'refresh-repo'
+    cmdhelp = _('Logins to chroot and refreshes specified repository')
+    args = (
+        ('--deploy', {'required': False, 'action': 'store_true', 'default': False,
+                      'help': _('Deploy container instance if not exists, default: False')}),
+        ('--ctype', {'dest': 'ctype', 'required': True, 'choices': PackageType.cache_type_refreshed_map(),
+                     'help': _('Cache type to be refreshed')})
+    )
+    root_required = True
+    required_binaries = ['systemd-nspawn']
+
+    def run(self, deploy, ctype):
+        nsconainer = NSPContainer()
+        if not nsconainer.deployed():
+            if deploy:
+                nsconainer.deploy()
+            else:
+                exit_with_error(_('Could not login to container {}: does not deployed').format(nsconainer.name))
+        nsconainer.refresh_repo(ctype)
 
 
 def make_default_subparser(main_parser, cls):
