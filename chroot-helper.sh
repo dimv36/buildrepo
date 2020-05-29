@@ -25,25 +25,6 @@ function exec_cmd_or_fail()
 }
 
 
-function build_package()
-{
-	bash -c "dpkg-buildpackage"
-	retcode=$?
-	if [[ "retcode" -ne "0" ]]
-	then
-		echo "RETCODE $retcode"
-		case "$retcode" in
-			"1")
-				;;
-			"25")
-				;;
-			*)
-				exit $retcode
-		esac
-	fi
-}
-
-
 function refresh_repo()
 {
 	REPO=$1

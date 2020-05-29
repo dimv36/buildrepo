@@ -29,7 +29,7 @@ if not sys.version_info >= (3, 5,):
 _ = gettext.gettext
 
 # Script version
-__version__ = '1.0'
+__version__ = '1.1'
 
 # Disable warnings
 warnings.filterwarnings('ignore')
@@ -820,10 +820,6 @@ class _BaseIsoReposisory:
             return dt.strftime('%d.%m.%Y %H:%M')
         return dt.strftime('%Y-%m-%d')
 
-    @staticmethod
-    def fmttouch(dt):
-        return dt.strftime('%Y%m%d%H%M')
-
     def _iso_type(self):
         raise NotImplementedError()
 
@@ -850,11 +846,12 @@ class _BaseIsoReposisory:
         return proc.returncode == 0
 
     def _touch_at(self, touch_dt):
-        find_bin = shutil.which('find')
-        if not self._run_command_log([find_bin, self.repodir,
-                                      '-exec', 'touch', '-t',
-                                      self.fmttouch(touch_dt), '{}', ';']):
-            exit_with_error(_('Touching failed'))
+        ts = touch_dt.timestamp()
+        for root, subdirs, files in os.walk(self.repodir):
+            for subdir in subdirs:
+                os.utime(os.path.join(root, subdir), (ts, ts))
+            for file in files:
+                os.utime(os.path.join(root, file), (ts, ts))
 
     def _make_iso(self, isopath, target, label, touch_dt):
         with change_directory(os.path.join(self.repodir, '..')):
@@ -978,17 +975,39 @@ class SourceIso(_BaseIsoReposisory):
             required_files += sources_include
         for req in required_files:
             shutil.copyfile(req, os.path.join(self.repodir, os.path.basename(req)))
+        # Copy packages from os not builded directory
+        ospkgs = glob.glob(os.path.join(self._conf.ospkgsdirpath, '*.deb'))
+        if len(ospkgs):
+            ospkgspath = os.path.join(self.repodir, 'ospkgs')
+            os.makedirs(ospkgspath)
+            for pkg in ospkgs:
+                pkgname = os.path.basename(pkg)
+                dst = os.path.join(ospkgspath, pkgname)
+                shutil.copyfile(pkg, dst)
         # Create buildrepo.conf, used for those repository
         source_buildrepo_path = os.path.join(self.repodir, os.path.basename(self._conf.conf_path))
         with open(source_buildrepo_path, mode='w') as sfp, open(self._conf.conf_path, mode='r') as fp:
-            keys_re = r'^(?P<key>build-root|mirror\d+|root-pwd-hash|debs)\s?\s+='
+            keys_re = r'^(?P<key>build-root|mirror\d+|root-pwd-hash|debs|creation-timestamp)\s*='
+            hashsums_re = r'^\[hashsums\]\s*'
+            hashsums_section = False
             for line in fp.readlines():
                 line = line.strip()
+                hashsums_m = re.match(hashsums_re, line)
                 m = re.match(keys_re, line)
-                if m:
-                    sfp.write('# {} =\n'.format(m.group('key')))
+                if m or hashsums_section:
+                    if m:
+                        sfp.write('# {} =\n'.format(m.group('key')))
+                    else:
+                        kvmatch = re.match(r'(?P<key>.*)\s*=\s*(?P<value>.*)', line)
+                        if kvmatch:
+                            sfp.write('# {}=\n'.format(kvmatch.group('key')))
+                        else:
+                            sfp.write('{}\n'.format(line))
+                elif hashsums_m:
+                    sfp.write('{}\n'.format(line))
+                    hashsums_section = True
                 else:
-                    sfp.write(line + '\n')
+                    sfp.write('{}\n'.format(line))
         isoname = 'sources-{}_{}_{}_{}.iso'.format(self._conf.reponame,
                                                    self._conf.repoversion,
                                                    self._conf.distro,
@@ -1785,10 +1804,16 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                 self._emit_unresolved(unresolve)
             if len(deps_in_dev):
                 self._emit_resolved_in_dev(deps_in_dev)
-            target_deps = [d for d in deps if d[DependencyFinder.DF_DEST] == PackageType.PACKAGE_BUILDED]
+            target_deps = [d for d in deps if d[DependencyFinder.DF_DEST] in (PackageType.PACKAGE_BUILDED,
+                                                                              PackageType.PACKAGE_FROM_OS_NB_REPO)]
             files_to_copy = set()
             for p in target_deps:
+                cache_type = p[DependencyFinder.DF_DEST]
                 resolved = p[DependencyFinder.DF_RESOLVED]
+                # NB: because we can have packages from OS not builded repo,
+                # ignores source finding for them
+                if cache_type == PackageType.PACKAGE_FROM_OS_NB_REPO:
+                    continue
                 source_key = '{}_{}'.format(*resolved)
                 if source_key in sources.keys():
                     continue
