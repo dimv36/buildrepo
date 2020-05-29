@@ -613,7 +613,6 @@ class PackageType:
         ret = {}
         for attr in ['PACKAGE_FROM_OS_REPO',
                      'PACKAGE_FROM_EXT_REPO',
-                     'PACKAGE_FROM_OS_NB_REPO',
                      'PACKAGE_FROM_OS_DEV_REPO',
                      'PACKAGE_FROM_EXT_DEV_REPO']:
             attrval = getattr(cls, attr)
@@ -621,6 +620,7 @@ class PackageType:
             attrkey = m.group('type').lower().replace('_', '-')
             ret[attrkey] = attrval
         if full:
+            ret['os packages'] = cls.PACKAGE_FROM_OS_NB_REPO
             ret['builded'] = cls.PACKAGE_BUILDED
             ret['not found'] = cls.PACKAGE_NOT_FOUND
         return ret
@@ -1125,7 +1125,7 @@ class RepositoryCache:
                          'ctype': self.__ctype,
                          'packages': self.__packages}
             out.write(self.json.dumps(cache_obj, sort_keys=True, indent=4))
-        return len(self) > 0
+        return len(self)
 
     @classmethod
     def load(cls, conf, cache_path):
@@ -1905,8 +1905,8 @@ class MakePackageCacheCmd(BaseCommand):
     def run(self, mount_path, name, ctype, info_message=True):
         if isinstance(ctype, str):
             ctype = PackageType.cache_type_created_map().get(ctype)
-        is_builded = (ctype == PackageType.PACKAGE_BUILDED)
-        if not is_builded:
+        is_local = (ctype in (PackageType.PACKAGE_BUILDED, PackageType.PACKAGE_FROM_OS_NB_REPO))
+        if not is_local:
             packages_path = []
             dists_path = os.path.join(mount_path, 'dists')
             for root, dirs, files in os.walk(dists_path):
@@ -1917,9 +1917,9 @@ class MakePackageCacheCmd(BaseCommand):
         if not len(packages_path):
             exit_with_error(_('Can\'t find any Packages files in {}').format(mount_path))
         c = RepositoryCache(self._conf, name, ctype)
-        if not c.create(packages_path):
-            exit_with_error(_('Cache creation failed'))
+        pkgs_count = c.create(packages_path)
         if info_message:
+            logging.info(_('Got {} packages').format(pkgs_count))
             logging.info(_('Cache saved to {}').format(c.cache_path))
 
 
@@ -2261,8 +2261,8 @@ class RefreshPackagesCmd(BaseCommand):
     args = (
         ('--deploy', {'required': False, 'action': 'store_true', 'default': False,
                       'help': _('Deploy container instance if not exists, default: False')}),
-        ('--ctype', {'dest': 'ctype', 'required': True, 'choices': PackageType.cache_type_refreshed_map(),
-                     'help': _('Cache type to be refreshed')})
+        ('--type', {'dest': 'ctype', 'required': True, 'choices': PackageType.cache_type_refreshed_map(),
+                    'help': _('Cache type to be refreshed')})
     )
     root_required = True
     required_binaries = ['systemd-nspawn']
@@ -2335,6 +2335,7 @@ def register_atexit_callbacks():
                 return
             for item in (os.path.join(conf.root, 'logs'),
                          os.path.join(conf.root, 'repo'),
+                         os.path.join(conf.root, 'ospkgs'),
                          conf.cachedirpath,
                          conf.chrootsdirpath):
                 _chown_recurse(item, sudo_user, sudo_group)
