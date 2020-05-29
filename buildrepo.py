@@ -1120,6 +1120,8 @@ class RepositoryCache:
 
         packages = []
         for path in packages_path:
+            if not os.path.exists(path):
+                continue
             try:
                 with self.gzip.open(path, mode='rb') as gfile:
                     content = gfile.read().decode('utf-8', 'ignore')
