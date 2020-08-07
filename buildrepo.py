@@ -1615,7 +1615,7 @@ class BuildCmd(BaseCommand):
             if len(rebuild):
                 logging.warning(_('Package rebuilding {} ignored, '
                                   'because options --rebuild-all specified').format(', '.join(rebuild)))
-            rebuild = self.__sources_list
+            rebuild = [p for p, v in self.__sources_list.build_list]
             logging.warning(_('Will be rebuilded following packages: {}').format(self.__sources_list.build_list_str))
         self.__make_build(jobs, rebuild, clean)
 
