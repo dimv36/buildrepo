@@ -1070,7 +1070,7 @@ class RepositoryCache:
         return (sorted(p.get('package') for p in self.__packages if not p['virtual']))
 
     def create(self, packages_path):
-        version_fix_re = r'(?P<name>.*) (.*)'
+        version_fix_re = r'(?P<name>.*) \((?P<sversion>.*)\)'
 
         def process_line_buffer(line_buffer):
             pkginfo = {}
@@ -1091,13 +1091,19 @@ class RepositoryCache:
             # NB: Fix for package version, if it's have version in name
             # e.g. java-common (0.58) - WTF???
             if is_builded:
-                for key in ('package', 'source'):
-                    val = pkginfo.get(key, None)
-                    if val:
-                        m = re.match(version_fix_re, val)
-                        if m:
-                            val = m.group('name')
-                            pkginfo[key] = val
+                # NB: Source field can provide source version
+                source = pkginfo.get('source', None)
+                if source:
+                    m = re.match(version_fix_re, source)
+                    if m:
+                        pkginfo['sversion'] = m.group('sversion')
+                        pkginfo['source'] = m.group('name')
+                # NB: If no source we get, so source is equal binary package
+                if not pkginfo.get('source', None):
+                    pkginfo['source'] = pkginfo.get('package')
+                # NB: The same as source version
+                if not pkginfo.get('sversion', None):
+                    pkginfo['sversion'] = pkginfo.get('version')
             full_pkginfo = []
             if 'provides' in pkginfo:
                 provides = pkginfo.get('provides')
@@ -1233,12 +1239,14 @@ class RepositoryCache:
 
     def source_package(self, binary_package, version):
         for pkginfo in self.__packages:
-            pkgname, pkgver = pkginfo.get('package'), pkginfo.get('version')
-            # NB: Version epoch hack
-            # e.g.: 1:3.1+dfsg-2 is the same as 3.1+dfsg-2
+            pkgname = pkginfo.get('package')
+            pkgver = pkginfo.get('version')
+            if pkginfo.get('virtual', False):
+                real_pkg, real_version = pkginfo.get('real_package'), pkginfo.get('real_version')
+                return self.source_package(real_pkg, real_version)
             if binary_package == pkgname and version in pkgver:
-                # If source is None, source is equal as Package field
-                return pkginfo.get('source') or binary_package
+                value = pkginfo.get('source'), pkginfo.get('sversion')
+                return value
         return None
 
 
@@ -1565,13 +1573,15 @@ class BuildCmd(BaseCommand):
                 if sorted(dscfile.binaries) == sorted(missing_binaries):
                     logging.info(_('Source package {} will be builded').format(package))
                 else:
-                    logging.info(_('Source package {} will be {} due to missing binaries: {}').format(
-                        package, ', '.join(missing_binaries)))
+                    logging.info(_('Source package {} will be builded due to missing binaries: {}').format(
+                                   package, ', '.join(missing_binaries)))
             elif not need_rebuild:
                 logging.info(_('Package {} already builded, skipped').format(
                     '{} = {}'.format(package, version) if len(version) else package))
             return (need_rebuild, dscfilepath)
         except Exception:
+            import traceback
+            traceback.print_exc()
             exit_with_error(_('Failed to get binaries for {}').format(package))
 
     def __make_build(self, jobs, rebuild, clean):
@@ -1599,6 +1609,8 @@ class BuildCmd(BaseCommand):
                         logging.debug(_('Copying {} to {} ...').format(src, dst))
                         shutil.copy(src, dst)
                 except Exception:
+                    import traceback
+                    traceback.print_exc()
                     exit_with_error(_('Failed to determine sources of package {}').format(pkgname))
                 # Run chroot helper for package building
                 try:
@@ -1725,28 +1737,10 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
     def __sources(self, pkg, version):
         source = self._builded_cache.source_package(pkg, version)
         if source is None:
-            exit_with_error(_('Failed finding sources for {}_{}').format(pkg, version))
-        glob_re = os.path.join(self._conf.srcdirpath, '{}_{}*.dsc'.format(source, version))
-        dscfilepath = glob.glob(glob_re)
-        if not len(dscfilepath):
-            # Failed, e.g. if binary version is not the same as source version
-            glob_re = os.path.join(self._conf.srcdirpath, '{}_*.dsc'.format(source))
-            dscfiles = glob.glob(glob_re)
-            founded = None
-            for dscfile in dscfiles:
-                base = os.path.basename(dscfile)
-                m = re.match(r'.*_(?P<pversion>.*).dsc', base)
-                if m:
-                    pversion = m.group('pversion')
-                    if pversion in version:
-                        # Founded, break
-                        founded = dscfile
-                        break
-            if not founded:
-                exit_with_error(_('Failed to find sources via regexp {}').format(glob_re))
-            else:
-                dscfilepath = [founded]
-        dscfilepath = dscfilepath[0]
+            exit_with_error(_('Failed finding sources for {} = {}').format(pkg, version))
+        dscfilepath = os.path.join(self._conf.srcdirpath, '{}_{}.dsc'.format(*source))
+        if not os.path.exists(dscfilepath):
+            exit_with_error(_('Failed to find source {}').format(dscfilepath))
         dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
         return tuple(dscfile.filelist + [os.path.basename(dscfilepath)])
 
