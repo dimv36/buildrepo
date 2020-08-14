@@ -688,6 +688,19 @@ class DependencyFinder:
                 processed.append(binary)
         return processed
 
+    def __best_dependency_resolved(self, deps_map):
+        best = None
+        rdep = None
+        for dep, resinfo in deps_map.items():
+            depdest, pdstinfo, resolved, required_by = resinfo
+            if not best:
+                rdep, best = dep, resinfo
+            else:
+                olddepdest, *unused = best
+                if depdest < olddepdest:
+                    rdep, best = dep, resinfo
+        return rdep, best
+
     def __recurse_deps(self, s, p):
         required_by = form_dependency(p)
         dest, *unused, deps, binaries = self.__rfcache.find_dependencies(p, required_by)
@@ -730,10 +743,7 @@ class DependencyFinder:
                             self.__recurse_deps(s, dep)
             else:
                 # Alternative dependency?
-                item = None
-                resolved = None
-                depdest = None
-                unresolved = []
+                deps_map = {}
                 for dpitem in dep:
                     dpitem = tuple(dpitem)
                     seen_item = (dpitem, required_by,)
@@ -741,36 +751,32 @@ class DependencyFinder:
                         item, unused = seen_item
                         continue
                     depdest, pdstinfo, resolved, *unused = self.__rfcache.find_dependencies(*seen_item)
-                    if depdest == PackageType.PACKAGE_NOT_FOUND:
-                        i = (depdest, pdstinfo, resolved, required_by)
-                        assert (len(i) == 4), (item, len(i))
-                        if i not in unresolved:
-                            unresolved.append(i)
-                    else:
-                        item = (depdest, pdstinfo, resolved, required_by)
-                        if item not in s:
-                            assert (len(item) == 4), (item, len(item))
-                            s.append(item)
-                            if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
-                                self.__recurse_deps(s, dpitem)
-                        unresolved.clear()
-                        break
-                if len(unresolved):
-                    for item in unresolved:
-                        if item not in s:
-                            s.append(item)
-                if self.__flags & DependencyFinder.FLAG_FINDER_MAIN and not item:
-                    alt_dep_full = ' | '.join(form_dependency(d) for d in dep)
+                    if dpitem not in deps_map:
+                        deps_map[dpitem] = (depdest, pdstinfo, resolved, required_by)
+                # Find the best for us
+                subdep, alt_resolved = self.__best_dependency_resolved(deps_map)
+                altdepstr = ' | '.join(form_dependency(d) for d in dep)
+                logging.debug(_('Alternative dependency {} resolved by {}').format(altdepstr, form_dependency(subdep)))
+                depstate, *unused = alt_resolved
+                if self.__flags & DependencyFinder.FLAG_FINDER_MAIN and depstate == PackageType.PACKAGE_NOT_FOUND:
+                    depstr = ' | '.join(form_dependency(d) for d in dep)
                     # Can't resolve alternative dependency, got the last
                     last_alt_dep = tuple(dep[-1])
                     item = (depdest, last_alt_dep, resolved, required_by)
                     logging.warning(_('Runtime dependency resolving {} failed for {}').format(
-                        alt_dep_full, form_dependency(p)))
+                                    depstr, form_dependency(p)))
                     if item not in s:
                         assert (len(item) == 4), (item, len(item))
                         s.append(item)
                         if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
                             self.__recurse_deps(s, last_alt_dep)
+                # Ok, add to deplist and recurse itself
+                elif not depstate == PackageType.PACKAGE_NOT_FOUND:
+                    if alt_resolved not in s:
+                        assert (len(alt_resolved) == 4), (alt_resolved, len(alt_resolved))
+                        s.append(alt_resolved)
+                        if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
+                            self.__recurse_deps(s, subdep)
 
     def __find_dep(self, pkgname):
         def sortversions(versions):
