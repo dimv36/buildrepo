@@ -1247,12 +1247,14 @@ class RepositoryCache:
         for pkginfo in self.__packages:
             pkgname = pkginfo.get('package')
             pkgver = pkginfo.get('version')
+            real_pkg = pkginfo.get('real_package')
+            real_version = pkginfo.get('real_version')
             if pkginfo.get('virtual', False):
-                real_pkg, real_version = pkginfo.get('real_package'), pkginfo.get('real_version')
-                return self.source_package(real_pkg, real_version)
-            if binary_package == pkgname and version in pkgver:
-                value = pkginfo.get('source'), pkginfo.get('sversion')
-                return value
+                if binary_package == real_pkg and version in real_version:
+                    return self.source_package(real_pkg, real_version)
+            else:
+                if binary_package == pkgname and version in pkgver:
+                    return pkginfo.get('source'), pkginfo.get('sversion')
         return None
 
 
@@ -1867,7 +1869,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                     exit_with_error(_('Failed to find binaries by glob re: {}').format(glob_copy_re))
                 assert (len(binaries) == 1)
                 # Exclude binaries, if they already exists at 1nd disk
-                binary = binaries[0]
+                binary, = binaries
                 if os.path.basename(binary) in os.listdir(frepodirpath):
                     continue
                 files_to_copy.add(binary)
