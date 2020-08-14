@@ -29,7 +29,7 @@ if not sys.version_info >= (3, 5,):
 _ = gettext.gettext
 
 # Script version
-__version__ = '1.1'
+__version__ = '1.2'
 
 # Disable warnings
 warnings.filterwarnings('ignore')
