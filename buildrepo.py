@@ -753,6 +753,8 @@ class DependencyFinder:
                     depdest, pdstinfo, resolved, *unused = self.__rfcache.find_dependencies(*seen_item)
                     if dpitem not in deps_map:
                         deps_map[dpitem] = (depdest, pdstinfo, resolved, required_by)
+                if not deps_map:
+                    return
                 # Find the best for us
                 subdep, alt_resolved = self.__best_dependency_resolved(deps_map)
                 altdepstr = ' | '.join(form_dependency(d) for d in dep)
@@ -1508,6 +1510,7 @@ class RepoInitializerCmd(BaseCommand):
             os.makedirs(directory, exist_ok=True)
         for directory in [self._conf.chrootsdirpath,
                           self._conf.chrootsinstdirpath,
+                          self._conf.ospkgsdirpath,
                           self._conf.tmpdirpath,
                           self._conf.isodirpath]:
             logging.info(_('Creating directory {} ...').format(directory))
@@ -1746,9 +1749,16 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         source = self._builded_cache.source_package(pkg, version)
         if source is None:
             exit_with_error(_('Failed finding sources for {} = {}').format(pkg, version))
-        dscfilepath = os.path.join(self._conf.srcdirpath, '{}_{}.dsc'.format(*source))
+        pkgname, version = source
+        dscfilepath = os.path.join(self._conf.srcdirpath, '{}_{}.dsc'.format(pkgname, version))
         if not os.path.exists(dscfilepath):
-            exit_with_error(_('Failed to find source {}').format(dscfilepath))
+            # NB: Epoch hack
+            epoch_re = r'^\d:'
+            if re.match(epoch_re, version):
+                unused, version = re.split(epoch_re, version)
+                dscfilepath = os.path.join(self._conf.srcdirpath, '{}_{}.dsc'.format(pkgname, version))
+                if not os.path.exists(dscfilepath):
+                    exit_with_error(_('Failed to find source {}').format(dscfilepath))
         dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
         return tuple(dscfile.filelist + [os.path.basename(dscfilepath)])
 
