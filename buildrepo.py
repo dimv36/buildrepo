@@ -879,6 +879,8 @@ class DebianIsoRepository(_BaseIsoReposisory):
         super(DebianIsoRepository, self).__init__(tmpdir)
         self.__is_dev = is_dev
         self.__name = self._conf.reponame
+        if self.__is_dev:
+            self.__name = '{}-devel'.format(self.__name)
         self.__codename = self._conf.distro
         self.__reprepro_bin = None
         self.__arch = None
@@ -930,7 +932,7 @@ class DebianIsoRepository(_BaseIsoReposisory):
             logging.info(_('Creating repository for {} via reprepro ...').format(self.__name))
             for package in glob.glob('{}/*.deb'.format(packagesdir)):
                 if not self._run_command_log([self.__reprepro_bin, 'includedeb',
-                                              self.__name, package]):
+                                              self._conf.reponame, package]):
                     exit_with_error(_('Including binaries to repo failure'))
             for directory in ['db', 'conf']:
                 shutil.rmtree(directory)
