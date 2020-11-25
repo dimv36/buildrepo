@@ -879,8 +879,6 @@ class DebianIsoRepository(_BaseIsoReposisory):
         super(DebianIsoRepository, self).__init__(tmpdir)
         self.__is_dev = is_dev
         self.__name = self._conf.reponame
-        if self.__is_dev:
-            self.__name = '{}-devel'.format(self.__name)
         self.__codename = self._conf.distro
         self.__reprepro_bin = None
         self.__arch = None
@@ -903,9 +901,7 @@ class DebianIsoRepository(_BaseIsoReposisory):
         conf_directory = os.path.join(self.repodir, 'conf')
         os.makedirs(conf_directory, exist_ok=True)
         with open(os.path.join(conf_directory, 'distributions'), mode='w') as fp:
-            codename = '{}{}'.format(self._conf.reponame,
-                                     '-devel' if self.__is_dev else '')
-            fp.write('Codename: {}\n'.format(codename))
+            fp.write('Codename: {}\n'.format(self._conf.reponame))
             fp.write('Version: {}\n'.format(self._conf.repoversion))
             fp.write('Description: {} repository\n'.format(self._conf.reponame))
             self.__arch = self.platform.machine()
