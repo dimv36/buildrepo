@@ -29,7 +29,7 @@ if not sys.version_info >= (3, 5,):
 _ = gettext.gettext
 
 # Script version
-__version__ = '1.2'
+__version__ = '1.3'
 
 # Disable warnings
 warnings.filterwarnings('ignore')
@@ -653,6 +653,10 @@ class DependencyFinder:
      DF_PKGINFO,
      DF_RESOLVED,
      DF_REQUIRED) = range(4)
+    (DF_ITEM_DEST,
+     DF_ITEM_PKGINFO,
+     DF_ITEM_RESOLVE,
+     DF_ITEM_DEPSTR) = range(4)
 
     def __init__(self, rfcache):
         self.__deps = []
@@ -701,6 +705,11 @@ class DependencyFinder:
                     rdep, best = dep, resinfo
         return rdep, best
 
+    def __depend_is_present(self, dep, deplist):
+        *unused, depstr = dep
+        res = filter(lambda e: e[self.DF_ITEM_DEPSTR] == depstr, deplist)
+        return list(res)
+
     def __recurse_deps(self, s, p):
         required_by = form_dependency(p)
         dest, *unused, deps, binaries = self.__rfcache.find_dependencies(p, required_by)
@@ -732,11 +741,11 @@ class DependencyFinder:
                 if depdest == PackageType.PACKAGE_NOT_FOUND:
                     i = (depdest, pdstinfo, resolved, required_by)
                     assert (len(i) == 4), (i, len(i))
-                    if i not in s:
+                    if not self.__depend_is_present(i, s):
                         s.append(i)
                 else:
                     item = (depdest, pdstinfo, resolved, required_by)
-                    if item not in s:
+                    if self.__depend_is_present(item, s):
                         assert (len(item) == 4), (item, len(item))
                         s.append(item)
                         if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
@@ -767,7 +776,7 @@ class DependencyFinder:
                     item = (depdest, last_alt_dep, resolved, required_by)
                     logging.warning(_('Runtime dependency resolving {} failed for {}').format(
                                     depstr, form_dependency(p)))
-                    if item not in s:
+                    if not self.__depend_is_present(item, s):
                         assert (len(item) == 4), (item, len(item))
                         s.append(item)
                         if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
