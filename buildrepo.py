@@ -706,8 +706,8 @@ class DependencyFinder:
         return rdep, best
 
     def __depend_is_present(self, dep, deplist):
-        *unused, depstr = dep
-        res = filter(lambda e: e[self.DF_ITEM_DEPSTR] == depstr, deplist)
+        *unused, resolved, depstr = dep
+        res = filter(lambda e: e[self.DF_ITEM_RESOLVE] == resolved and e[self.DF_ITEM_DEPSTR] == depstr, deplist)
         return list(res)
 
     def __recurse_deps(self, s, p):
