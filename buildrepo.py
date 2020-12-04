@@ -707,7 +707,7 @@ class DependencyFinder:
 
     def __depend_is_present(self, dep, deplist):
         *unused, resolved, depstr = dep
-        res = filter(lambda e: e[self.DF_ITEM_RESOLVE] == resolved and e[self.DF_ITEM_DEPSTR] == depstr, deplist)
+        res = filter(lambda e: e[self.DF_ITEM_DEPSTR] == depstr, deplist)
         return list(res)
 
     def __recurse_deps(self, s, p):
@@ -890,7 +890,6 @@ class DebianIsoRepository(_BaseIsoReposisory):
         self.__name = self._conf.reponame
         if self.__is_dev:
             self.__name = '{}-devel'.format(self.__name)
-        self.__codename = self._conf.distro
         self.__reprepro_bin = None
         self.__arch = None
         self.__base_init()
@@ -912,9 +911,9 @@ class DebianIsoRepository(_BaseIsoReposisory):
         conf_directory = os.path.join(self.repodir, 'conf')
         os.makedirs(conf_directory, exist_ok=True)
         with open(os.path.join(conf_directory, 'distributions'), mode='w') as fp:
-            fp.write('Codename: {}\n'.format(self._conf.reponame))
+            fp.write('Label: {} builded on {}\n'.format(self._conf.reponame, self._conf.distro))
+            fp.write('Codename: {}\n'.format(self._conf.distro))
             fp.write('Version: {}\n'.format(self._conf.repoversion))
-            fp.write('Description: {} repository\n'.format(self._conf.reponame))
             self.__arch = self.platform.machine()
             if self.__arch == 'x86_64':
                 self.__arch = 'amd64'
@@ -941,7 +940,7 @@ class DebianIsoRepository(_BaseIsoReposisory):
             logging.info(_('Creating repository for {} via reprepro ...').format(self.__name))
             for package in glob.glob('{}/*.deb'.format(packagesdir)):
                 if not self._run_command_log([self.__reprepro_bin, 'includedeb',
-                                              self._conf.reponame, package]):
+                                              self._conf.distro, package]):
                     exit_with_error(_('Including binaries to repo failure'))
             for directory in ['db', 'conf']:
                 shutil.rmtree(directory)
