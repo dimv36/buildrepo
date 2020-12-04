@@ -913,6 +913,7 @@ class DebianIsoRepository(_BaseIsoReposisory):
         with open(os.path.join(conf_directory, 'distributions'), mode='w') as fp:
             fp.write('Label: {} builded on {}\n'.format(self._conf.reponame, self._conf.distro))
             fp.write('Codename: {}\n'.format(self._conf.distro))
+            fp.write('Suite: {}\n'.format(self._conf.distro))
             fp.write('Version: {}\n'.format(self._conf.repoversion))
             self.__arch = self.platform.machine()
             if self.__arch == 'x86_64':
