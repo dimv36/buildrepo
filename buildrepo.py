@@ -655,7 +655,7 @@ class DependencyFinder:
      DF_REQUIRED) = range(4)
     (DF_ITEM_DEST,
      DF_ITEM_PKGINFO,
-     DF_ITEM_RESOLVE,
+     DF_ITEM_RESOLVED,
      DF_ITEM_DEPSTR) = range(4)
 
     def __init__(self, rfcache):
@@ -707,8 +707,8 @@ class DependencyFinder:
 
     def __depend_is_present(self, dep, deplist):
         *unused, resolved, depstr = dep
-        res = filter(lambda e: e[self.DF_ITEM_DEPSTR] == depstr, deplist)
-        return list(res)
+        res = filter(lambda e: e[self.DF_ITEM_RESOLVED] == resolved, deplist)
+        return len(list(res)) > 0
 
     def __recurse_deps(self, s, p):
         required_by = form_dependency(p)
@@ -725,14 +725,15 @@ class DependencyFinder:
                                                                self.__black_list,
                                                                func=lambda x, y: x == y)
                 for binary in filtered_binaries:
-                    dependency = [binary]
-                    if dependency not in deps:
-                        logging.debug(_('Adding dependency {} as builded from the same source ...').format(
-                            dependency))
-                        deps.append(dependency)
+                    same_sources_dep = (dest, binary, binary[:2], form_dependency(binary))
+                    if not self.__depend_is_present(same_sources_dep, s):
+                        dependency = [list(binary)]
+                        if dependency not in deps:
+                            deps.insert(0, dependency)
         for dep in deps:
             if len(dep) == 1:
-                dep = tuple(dep[0])
+                dep, = dep
+                dep = tuple(dep)
                 seen_item = (dep, required_by,)
                 if seen_item in self.__seendeps:
                     continue
@@ -745,7 +746,7 @@ class DependencyFinder:
                         s.append(i)
                 else:
                     item = (depdest, pdstinfo, resolved, required_by)
-                    if self.__depend_is_present(item, s):
+                    if not self.__depend_is_present(item, s):
                         assert (len(item) == 4), (item, len(item))
                         s.append(item)
                         if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
