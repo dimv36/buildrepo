@@ -802,8 +802,17 @@ class DependencyFinder:
             return versions
 
         pkg_glob_re = os.path.join(self.__conf.repodirpath, '{}_*.deb'.format(pkgname))
-        packages = glob.glob(pkg_glob_re)
-        versions = [re.match(r'.*_(?P<version>.*)_.*\.deb', p).group('version') for p in packages]
+        pnb_glob_re = os.path.join(self.__conf.ospkgsdirpath, '{}_*.deb'.format(pkgname))
+        packages = glob.glob(pkg_glob_re) or glob.glob(pnb_glob_re)
+        versions = []
+        for p in packages:
+            m = re.match(r'.*_(?P<version>.*)_.*\.deb', p)
+            if m:
+                versions.append(m.group('version'))
+                continue
+            m = re.match(r'.*_(?P<version>.*).deb', p)
+            if m:
+                versions.append(m.group('version'))
         if not len(packages):
             exit_with_error(_('Failed find package {} in repo').format(pkgname))
         elif len(packages) > 1:
@@ -1287,8 +1296,8 @@ class RepositoryFullCache:
                                 ('OS-DEV', PackageType.PACKAGE_FROM_OS_DEV_REPO)):
             caches = self._cache_by_type(repo_type)
             if len(caches) < 1:
-                exit_with_error(_('Cache for {} repo is required').format(repo))
-            elif len(caches) > 1:
+                logging.warning(_('No one {} caches are register').format(repo))
+            if len(caches) > 1:
                 logging.warning(_('Found {} {} repos').format(len(caches), repo))
 
     def _cache_by_type(self, ctype):
