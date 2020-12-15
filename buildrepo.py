@@ -825,10 +825,12 @@ class DependencyFinder:
         else:
             version = versions[0]
         pkg = (pkgname, version, '=')
-        depitem = (PackageType.PACKAGE_BUILDED,         # Destination
+        required_by = form_dependency(pkg)
+        dest = self.__rfcache.find_dependencies(pkg, required_by)
+        depitem = (dest,                                # Destination
                    pkg,                                 # Package's info
                    (pkgname, version),                  # Resolving information
-                   form_dependency(pkg))                # Dependency as string
+                   required_by)                         # Dependency as string
         self.__deps.append(depitem)
         return pkg
 
