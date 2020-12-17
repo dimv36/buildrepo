@@ -1101,7 +1101,7 @@ class RepositoryCache:
 
         def process_line_buffer(line_buffer):
             pkginfo = {}
-            keys = ['Package', 'Version', 'PreDepends', 'Depends', 'Provides']
+            keys = ['Package', 'Version', 'Pre-Depends', 'Depends', 'Provides']
             is_builded = self.__ctype == PackageType.PACKAGE_BUILDED
             if is_builded:
                 keys.append('Source')
@@ -1111,7 +1111,7 @@ class RepositoryCache:
                     m = re.match(key_re, line)
                     if m:
                         value = m.group('value')
-                        if key in ('PreDepends', 'Depends', 'Provides'):
+                        if key in ('Pre-Depends', 'Depends', 'Provides'):
                             value = apt_pkg.parse_depends(value)
                         pkginfo[key.lower()] = value
             pkginfo['virtual'] = False
@@ -1251,7 +1251,8 @@ class RepositoryCache:
                         binaries = self.binaries_for_source(source, pkginfo.get('version'))
                     else:
                         binaries = None
-                    return (pkgname, pkgver), pkginfo.get('depends', []), binaries
+                    all_depends = pkginfo.get('depends', []) + pkginfo.get('pre-depends', [])
+                    return (pkgname, pkgver), all_depends, binaries
         return None
 
     def binaries_for_source(self, source, version):
