@@ -1285,9 +1285,7 @@ class RepositoryFullCache:
         for repo, repo_type in (('OS', PackageType.PACKAGE_FROM_OS_REPO),
                                 ('OS-DEV', PackageType.PACKAGE_FROM_OS_DEV_REPO)):
             caches = self._cache_by_type(repo_type)
-            if len(caches) < 1:
-                exit_with_error(_('Cache for {} repo is required').format(repo))
-            elif len(caches) > 1:
+            if len(caches) > 1:
                 logging.warning(_('Found {} {} repos').format(len(caches), repo))
 
     def _cache_by_type(self, ctype):
