@@ -713,7 +713,7 @@ class DependencyFinder:
     def __recurse_deps(self, s, p):
         required_by = form_dependency(p)
         dest, *unused, deps, binaries = self.__rfcache.find_dependencies(p, required_by)
-        if dest == PackageType.PACKAGE_BUILDED:
+        if dest in (PackageType.PACKAGE_BUILDED, PackageType.PACKAGE_FROM_OS_NB_REPO):
             assert binaries is not None, 'binaries not found'
             if self.__flags & DependencyFinder.FLAG_FINDER_MAIN:
                 # Exclude filters: dev, dbg, etc. should be on 2nd disk
@@ -801,10 +801,16 @@ class DependencyFinder:
             return versions
 
         pkg_glob_re = os.path.join(self.__conf.repodirpath, '{}_*.deb'.format(pkgname))
-        packages = glob.glob(pkg_glob_re)
-        versions = [re.match(r'.*_(?P<version>.*)_.*\.deb', p).group('version') for p in packages]
+        pkg_glob_ospkgs_re = os.path.join(self.__conf.ospkgsdirpath, '{}_*.deb'.format(pkgname))
+        packages = glob.glob(pkg_glob_re) or glob.glob(pkg_glob_ospkgs_re)
+        versions = []
+        for p in packages:
+            for vre in [r'.*_(?P<version>.*)_.*.deb', r'.*_(?P<version>.*).deb']:
+                m = re.match(vre, p)
+                if m:
+                    versions.append(m.group('version'))
         if not len(packages):
-            exit_with_error(_('Failed find package {} in repo').format(pkgname))
+            exit_with_error(_('Failed to find package {} in repo').format(pkgname))
         elif len(packages) > 1:
             versions = sortversions(versions)
             logging.warning(_('Found {} versions of package {}: {}').format(
@@ -815,10 +821,12 @@ class DependencyFinder:
         else:
             version = versions[0]
         pkg = (pkgname, version, '=')
-        depitem = (PackageType.PACKAGE_BUILDED,         # Destination
-                   pkg,                                 # Package's info
-                   (pkgname, version),                  # Resolving information
-                   form_dependency(pkg))                # Dependency as string
+        depstr = form_dependency(pkg)
+        pkgdest = self.__rfcache.find_dependencies(pkg, depstr)
+        depitem = (pkgdest,              # Destination
+                   pkg,                  # Package's info
+                   (pkgname, version),   # Resolving information
+                   depstr)               # Dependency as string
         self.__deps.append(depitem)
         return pkg
 
@@ -1089,7 +1097,7 @@ class RepositoryCache:
 
         def process_line_buffer(line_buffer):
             pkginfo = {}
-            keys = ['Package', 'Version', 'PreDepends', 'Depends', 'Provides']
+            keys = ['Package', 'Version', 'Pre-Depends', 'Depends', 'Provides']
             is_builded = self.__ctype == PackageType.PACKAGE_BUILDED
             if is_builded:
                 keys.append('Source')
@@ -1099,7 +1107,7 @@ class RepositoryCache:
                     m = re.match(key_re, line)
                     if m:
                         value = m.group('value')
-                        if key in ('PreDepends', 'Depends', 'Provides'):
+                        if key in ('Pre-Depends', 'Depends', 'Provides'):
                             value = apt_pkg.parse_depends(value)
                         pkginfo[key.lower()] = value
             pkginfo['virtual'] = False
@@ -1195,8 +1203,7 @@ class RepositoryCache:
         return RepositoryCache(conf, name, ctype, packages)
 
     def __check_dep(self, pkgver, depop, depver):
-        return (apt_pkg.check_dep(pkgver, depop, depver) or
-                pkgver == depver)
+        return (apt_pkg.check_dep(pkgver, depop, depver) or pkgver == depver)
 
     def __process_virtual_dependency(self, vdep):
         vpkgname, vdepver, vdepop = vdep
@@ -1589,8 +1596,8 @@ class BuildCmd(BaseCommand):
                 if sorted(dscfile.binaries) == sorted(missing_binaries):
                     logging.info(_('Source package {} will be builded').format(package))
                 else:
-                    logging.info(_('Source package {} will be builded due to missing binaries: {}').format(
-                                   package, ', '.join(missing_binaries)))
+                    logging.info(_('Source package {} will be builded '
+                                   'due to missing binaries: {}').format(package, ', '.join(missing_binaries)))
             elif not need_rebuild:
                 logging.info(_('Package {} already builded, skipped').format(
                     '{} = {}'.format(package, version) if len(version) else package))
@@ -1753,7 +1760,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
     def __sources(self, pkg, version):
         source = self._builded_cache.source_package(pkg, version)
         if source is None:
-            exit_with_error(_('Failed finding sources for {} = {}').format(pkg, version))
+            exit_with_error(_('Failed to find sources for {} = {}').format(pkg, version))
         pkgname, version = source
         dscfilepath = os.path.join(self._conf.srcdirpath, '{}_{}.dsc'.format(pkgname, version))
         if not os.path.exists(dscfilepath):
