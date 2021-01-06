@@ -745,7 +745,7 @@ class DependencyFinder:
                 self.__seendeps.append(seen_item)
                 if depdest == PackageType.PACKAGE_NOT_FOUND:
                     i = (depdest, pdstinfo, resolved, required_by)
-                    self.__append_if_not_present(i)
+                    self.__append_dep_if_not_present(i)
                 else:
                     item = (depdest, pdstinfo, resolved, required_by)
                     appended = self.__append_dep_if_not_present(item)
@@ -819,7 +819,7 @@ class DependencyFinder:
             version = versions[0]
         pkg = (pkgname, version, '=')
         depstr = form_dependency(pkg)
-        pkgdest = self.__rfcache.find_dependencies(pkg, depstr)
+        pkgdest, *unused = self.__rfcache.find_dependencies(pkg, depstr)
         depitem = (pkgdest,              # Destination
                    pkg,                  # Package's info
                    (pkgname, version),   # Resolving information
@@ -1820,9 +1820,10 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             deps = self._get_depends_for_package(required,
                                                  exclude_rules=self.__dev_packages_suffixes,
                                                  black_list=self.__packages.get('target-dev', []))
-            unresolve = [d for d in deps if d[DependencyFinder.DF_DEST] == PackageType.PACKAGE_NOT_FOUND]
-            deps_in_dev = [d for d in deps if d[DependencyFinder.DF_DEST] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
-                                                                              PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
+            unresolve = list(filter(lambda e: e[DependencyFinder.DF_DEST] == PackageType.PACKAGE_NOT_FOUND, deps))
+            deps_in_dev = list(filter(lambda e: e[DependencyFinder.DF_DEST] in
+                                      (PackageType.PACKAGE_FROM_OS_DEV_REPO, PackageType.PACKAGE_FROM_EXT_DEV_REPO),
+                                      deps))
             if len(unresolve):
                 self._emit_unresolved(unresolve)
             if len(deps_in_dev):
@@ -1865,7 +1866,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             if m:
                 package_name = m.group('name')
                 dev_packages.append(package_name)
-        target_packages = map(lambda x: re.match(r'(?P<name>.*)_.*_.*.deb', os.path.basename(x)).group('name'),
+        target_packages = map(lambda x: re.match(r'(?P<name>.*)_.*.deb', os.path.basename(x)).group('name'),
                               target_builded_deps)
         dev_packages = sorted([p for p in (set(dev_packages) - set(target_packages))])
         for devpkg in dev_packages:
