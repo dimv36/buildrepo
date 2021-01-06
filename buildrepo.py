@@ -674,7 +674,7 @@ class DependencyFinder:
         self.__black_list = black_list
         self.__flags = flags
         pkg_deps_info = self.__find_dep(pkgname)
-        self.__recurse_deps(self.__deps, pkg_deps_info)
+        self.__recurse_deps(pkg_deps_info)
         return self.__deps
 
     def __exec_exclude_filter(self, binaries, filter_list, func=None):
@@ -705,15 +705,19 @@ class DependencyFinder:
                     rdep, best = dep, resinfo
         return rdep, best
 
-    def __depend_is_present(self, dep, deplist):
+    def __append_dep_if_not_present(self, dep):
+        assert (len(dep) == 4), (dep, len(dep))
         *unused, resolved, depstr = dep
-        res = filter(lambda e: e[self.DF_ITEM_RESOLVED] == resolved, deplist)
-        return len(list(res)) > 0
+        res = list(filter(lambda e: e[self.DF_RESOLVED] == resolved, self.__deps))
+        if not res:
+            self.__deps.append(dep)
+            return True
+        return False
 
-    def __recurse_deps(self, s, p):
+    def __recurse_deps(self, p):
         required_by = form_dependency(p)
         dest, *unused, deps, binaries = self.__rfcache.find_dependencies(p, required_by)
-        if dest == PackageType.PACKAGE_BUILDED:
+        if dest in (PackageType.PACKAGE_BUILDED, PackageType.PACKAGE_FROM_OS_NB_REPO):
             assert binaries is not None, 'binaries not found'
             if self.__flags & DependencyFinder.FLAG_FINDER_MAIN:
                 # Exclude filters: dev, dbg, etc. should be on 2nd disk
@@ -725,11 +729,12 @@ class DependencyFinder:
                                                                self.__black_list,
                                                                func=lambda x, y: x == y)
                 for binary in filtered_binaries:
-                    same_sources_dep = (dest, binary, binary[:2], form_dependency(binary))
-                    if not self.__depend_is_present(same_sources_dep, s):
-                        dependency = [list(binary)]
-                        if dependency not in deps:
-                            deps.insert(0, dependency)
+                    dependency = [binary]
+                    seen_item = (binary, form_dependency(p))
+                    if seen_item not in self.__seendeps:
+                        logging.debug(_('Adding dependency {} as builded from the same source ...').format(
+                            dependency))
+                        deps.append(dependency)
         for dep in deps:
             if len(dep) == 1:
                 dep, = dep
@@ -741,16 +746,12 @@ class DependencyFinder:
                 self.__seendeps.append(seen_item)
                 if depdest == PackageType.PACKAGE_NOT_FOUND:
                     i = (depdest, pdstinfo, resolved, required_by)
-                    assert (len(i) == 4), (i, len(i))
-                    if not self.__depend_is_present(i, s):
-                        s.append(i)
+                    self.__append_dep_if_not_present(i)
                 else:
                     item = (depdest, pdstinfo, resolved, required_by)
-                    if not self.__depend_is_present(item, s):
-                        assert (len(item) == 4), (item, len(item))
-                        s.append(item)
-                        if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
-                            self.__recurse_deps(s, dep)
+                    appended = self.__append_dep_if_not_present(item)
+                    if appended and not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
+                        self.__recurse_deps(dep)
             else:
                 # Alternative dependency?
                 deps_map = {}
@@ -777,18 +778,14 @@ class DependencyFinder:
                     item = (depdest, last_alt_dep, resolved, required_by)
                     logging.warning(_('Runtime dependency resolving {} failed for {}').format(
                                     depstr, form_dependency(p)))
-                    if not self.__depend_is_present(item, s):
-                        assert (len(item) == 4), (item, len(item))
-                        s.append(item)
-                        if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
-                            self.__recurse_deps(s, last_alt_dep)
+                    appended = self.__append_dep_if_not_present(item)
+                    if appended and not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
+                        self.__recurse_deps(last_alt_dep)
                 # Ok, add to deplist and recurse itself
                 elif not depstate == PackageType.PACKAGE_NOT_FOUND:
-                    if alt_resolved not in s:
-                        assert (len(alt_resolved) == 4), (alt_resolved, len(alt_resolved))
-                        s.append(alt_resolved)
-                        if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
-                            self.__recurse_deps(s, subdep)
+                    appended = self.__append_dep_if_not_present(alt_resolved)
+                    if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
+                        self.__recurse_deps(subdep)
 
     def __find_dep(self, pkgname):
         def sortversions(versions):
@@ -802,19 +799,16 @@ class DependencyFinder:
             return versions
 
         pkg_glob_re = os.path.join(self.__conf.repodirpath, '{}_*.deb'.format(pkgname))
-        pnb_glob_re = os.path.join(self.__conf.ospkgsdirpath, '{}_*.deb'.format(pkgname))
-        packages = glob.glob(pkg_glob_re) or glob.glob(pnb_glob_re)
+        pkg_glob_ospkgs_re = os.path.join(self.__conf.ospkgsdirpath, '{}_*.deb'.format(pkgname))
+        packages = glob.glob(pkg_glob_re) or glob.glob(pkg_glob_ospkgs_re)
         versions = []
         for p in packages:
-            m = re.match(r'.*_(?P<version>.*)_.*\.deb', p)
-            if m:
-                versions.append(m.group('version'))
-                continue
-            m = re.match(r'.*_(?P<version>.*).deb', p)
-            if m:
-                versions.append(m.group('version'))
+            for vre in [r'.*_(?P<version>.*)_.*.deb', r'.*_(?P<version>.*).deb']:
+                m = re.match(vre, p)
+                if m:
+                    versions.append(m.group('version'))
         if not len(packages):
-            exit_with_error(_('Failed find package {} in repo').format(pkgname))
+            exit_with_error(_('Failed to find package {} in repo').format(pkgname))
         elif len(packages) > 1:
             versions = sortversions(versions)
             logging.warning(_('Found {} versions of package {}: {}').format(
@@ -825,12 +819,12 @@ class DependencyFinder:
         else:
             version = versions[0]
         pkg = (pkgname, version, '=')
-        required_by = form_dependency(pkg)
-        dest = self.__rfcache.find_dependencies(pkg, required_by)
-        depitem = (dest,                                # Destination
-                   pkg,                                 # Package's info
-                   (pkgname, version),                  # Resolving information
-                   required_by)                         # Dependency as string
+        depstr = form_dependency(pkg)
+        pkgdest, *unused = self.__rfcache.find_dependencies(pkg, depstr)
+        depitem = (pkgdest,              # Destination
+                   pkg,                  # Package's info
+                   (pkgname, version),   # Resolving information
+                   depstr)               # Dependency as string
         self.__deps.append(depitem)
         return pkg
 
@@ -1207,8 +1201,7 @@ class RepositoryCache:
         return RepositoryCache(conf, name, ctype, packages)
 
     def __check_dep(self, pkgver, depop, depver):
-        return (apt_pkg.check_dep(pkgver, depop, depver) or
-                pkgver == depver)
+        return (apt_pkg.check_dep(pkgver, depop, depver) or pkgver == depver)
 
     def __process_virtual_dependency(self, vdep):
         vpkgname, vdepver, vdepop = vdep
@@ -1298,8 +1291,6 @@ class RepositoryFullCache:
         for repo, repo_type in (('OS', PackageType.PACKAGE_FROM_OS_REPO),
                                 ('OS-DEV', PackageType.PACKAGE_FROM_OS_DEV_REPO)):
             caches = self._cache_by_type(repo_type)
-            if len(caches) < 1:
-                logging.warning(_('No one {} caches are register').format(repo))
             if len(caches) > 1:
                 logging.warning(_('Found {} {} repos').format(len(caches), repo))
 
@@ -1604,8 +1595,8 @@ class BuildCmd(BaseCommand):
                 if sorted(dscfile.binaries) == sorted(missing_binaries):
                     logging.info(_('Source package {} will be builded').format(package))
                 else:
-                    logging.info(_('Source package {} will be builded due to missing binaries: {}').format(
-                                   package, ', '.join(missing_binaries)))
+                    logging.info(_('Source package {} will be builded '
+                                   'due to missing binaries: {}').format(package, ', '.join(missing_binaries)))
             elif not need_rebuild:
                 logging.info(_('Package {} already builded, skipped').format(
                     '{} = {}'.format(package, version) if len(version) else package))
@@ -1768,7 +1759,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
     def __sources(self, pkg, version):
         source = self._builded_cache.source_package(pkg, version)
         if source is None:
-            exit_with_error(_('Failed finding sources for {} = {}').format(pkg, version))
+            exit_with_error(_('Failed to find sources for {} = {}').format(pkg, version))
         pkgname, version = source
         dscfilepath = os.path.join(self._conf.srcdirpath, '{}_{}.dsc'.format(pkgname, version))
         if not os.path.exists(dscfilepath):
@@ -1831,9 +1822,10 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             deps = self._get_depends_for_package(required,
                                                  exclude_rules=self.__dev_packages_suffixes,
                                                  black_list=self.__packages.get('target-dev', []))
-            unresolve = [d for d in deps if d[DependencyFinder.DF_DEST] == PackageType.PACKAGE_NOT_FOUND]
-            deps_in_dev = [d for d in deps if d[DependencyFinder.DF_DEST] in (PackageType.PACKAGE_FROM_OS_DEV_REPO,
-                                                                              PackageType.PACKAGE_FROM_EXT_DEV_REPO)]
+            unresolve = list(filter(lambda e: e[DependencyFinder.DF_DEST] == PackageType.PACKAGE_NOT_FOUND, deps))
+            deps_in_dev = list(filter(lambda e: e[DependencyFinder.DF_DEST] in
+                                      (PackageType.PACKAGE_FROM_OS_DEV_REPO, PackageType.PACKAGE_FROM_EXT_DEV_REPO),
+                                      deps))
             if len(unresolve):
                 self._emit_unresolved(unresolve)
             if len(deps_in_dev):
@@ -1846,15 +1838,15 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                 resolved = p[DependencyFinder.DF_RESOLVED]
                 # NB: because we can have packages from OS not builded repo,
                 # ignores source finding for them
-                if cache_type == PackageType.PACKAGE_FROM_OS_NB_REPO:
-                    continue
-                source_key = '{}_{}'.format(*resolved)
-                if source_key in sources.keys():
-                    continue
-                sources[source_key] = self.__sources(*resolved)
+                if not cache_type == PackageType.PACKAGE_FROM_OS_NB_REPO:
+                    source_key = '{}_{}'.format(*resolved)
+                    if source_key in sources.keys():
+                        continue
+                    sources[source_key] = self.__sources(*resolved)
                 # Binary packages for copying
                 glob_copy_re = os.path.join(self._conf.repodirpath, '{}_{}*.deb'.format(*resolved))
-                binaries = glob.glob(glob_copy_re)
+                glob_copy_nb_re = os.path.join(self._conf.ospkgsdirpath, '{}_{}*.deb'.format(*resolved))
+                binaries = glob.glob(glob_copy_re) or glob.glob(glob_copy_nb_re)
                 if not len(binaries):
                     exit_with_error(_('Failed to find binaries by glob re: {}').format(glob_copy_re))
                 assert (len(binaries) == 1)
@@ -1876,7 +1868,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             if m:
                 package_name = m.group('name')
                 dev_packages.append(package_name)
-        target_packages = map(lambda x: re.match(r'(?P<name>.*)_.*_.*.deb', os.path.basename(x)).group('name'),
+        target_packages = map(lambda x: re.match(r'(?P<name>.*)_.*.deb', os.path.basename(x)).group('name'),
                               target_builded_deps)
         dev_packages = sorted([p for p in (set(dev_packages) - set(target_packages))])
         for devpkg in dev_packages:
