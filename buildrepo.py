@@ -29,7 +29,7 @@ if not sys.version_info >= (3, 5,):
 _ = gettext.gettext
 
 # Script version
-__version__ = '1.3'
+__version__ = '1.4'
 
 # Disable warnings
 warnings.filterwarnings('ignore')
@@ -942,7 +942,7 @@ class DebianIsoRepository(_BaseIsoReposisory):
                                                                              distro=self._conf.distro,
                                                                              arch=self.__arch))
 
-    def create(self, packagesdir, touch_dt):
+    def create(self, packagesdir, includes, touch_dt):
         with change_directory(self.repodir):
             logging.info(_('Creating repository for {} via reprepro ...').format(self.__name))
             for package in glob.glob('{}/*.deb'.format(packagesdir)):
@@ -958,7 +958,8 @@ class DebianIsoRepository(_BaseIsoReposisory):
                                                                                  distro=self._conf.distro,
                                                                                  arch=self.__arch,
                                                                                  date=self.fmtdate(touch_dt, True)))
-
+            for req in includes:
+                shutil.copyfile(req, os.path.join(self.repodir, os.path.basename(req)))
         isoname = '{repo}_{version}_{distro}_{date}.iso'.format(repo=self.__name,
                                                                 version=self._conf.repoversion,
                                                                 distro=self._conf.distro,
@@ -1664,17 +1665,8 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
     def __init__(self, conf_path):
         super().__init__(conf_path)
         # Sources
-        sources_include = self._conf.parser.get(MakeRepoCmd.alias, 'source-include', fallback=[])
-        if isinstance(sources_include, str):
-            sources_include = sources_include.split(',')
-        sources = []
-        for source in sources_include:
-            abspath = os.path.abspath(source)
-            if os.path.exists(abspath):
-                sources.append(abspath)
-            else:
-                exit_with_error(_('File {} does not exists').format(abspath))
-        self.__sources_include = sources
+        self.__sources_include = self.__parse_includes('source-include')
+        self.__binary_include = self.__parse_includes('binary-include')
         self.__packages = {}
         # white list
         white_list = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'white-list', fallback=None)
@@ -1698,6 +1690,19 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         self.__touch_dt = self.__get_touch_dt()
         # hashsums
         self.__hashinfo = self.__parse_hash_info()
+
+    def __parse_includes(self, param):
+        sources_include = self._conf.parser.get(MakeRepoCmd.alias, param, fallback=[])
+        if isinstance(sources_include, str):
+            sources_include = sources_include.split(',')
+        sources = []
+        for source in sources_include:
+            abspath = os.path.abspath(source)
+            if os.path.exists(abspath):
+                sources.append(abspath)
+            else:
+                exit_with_error(_('File {} does not exists').format(abspath))
+        return sources
 
     def __parse_white_list(self, white_list_path):
         i = 1
@@ -1928,11 +1933,11 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         self.__log_stage(_('Making ISO repositories ...'))
         # Creates reprepro images for binary repositories (main и dev)
         isopaths = []
-        for items in ((frepodirpath, False),
-                      (frepodevdirpath, True)):
-            pkgpath, is_dev = items
+        for items in ((frepodirpath, self.__binary_include, False),
+                      (frepodevdirpath, [], True)):
+            pkgpath, includes, is_dev = items
             iso_maker = DebianIsoRepository(tmpdirpath, is_dev)
-            path = iso_maker.create(pkgpath, self.__touch_dt)
+            path = iso_maker.create(pkgpath, includes, self.__touch_dt)
             isopaths.append(path)
         # Creates sources ISO disk
         sources_iso_tmpdir = os.path.join(tmpdirpath, '{}_src_iso'.format(self._conf.reponame))
