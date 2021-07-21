@@ -29,7 +29,7 @@ if not sys.version_info >= (3, 5,):
 _ = gettext.gettext
 
 # Script version
-__version__ = '1.4'
+__version__ = '1.4.1'
 
 # Disable warnings
 warnings.filterwarnings('ignore')
@@ -959,7 +959,9 @@ class DebianIsoRepository(_BaseIsoReposisory):
                                                                                  arch=self.__arch,
                                                                                  date=self.fmtdate(touch_dt, True)))
             for req in includes:
-                shutil.copyfile(req, os.path.join(self.repodir, os.path.basename(req)))
+                dst = os.path.join(self.repodir, os.path.basename(req))
+                shutil.copyfile(req, dst)
+                shutil.copymode(req, dst)
         isoname = '{repo}_{version}_{distro}_{date}.iso'.format(repo=self.__name,
                                                                 version=self._conf.repoversion,
                                                                 distro=self._conf.distro,
