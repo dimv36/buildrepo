@@ -67,7 +67,7 @@ function cmd_build
 	exec_cmd_or_fail "apt-get build-dep ./"
 
 	# Try to build package
-	exec_cmd_or_fail "sudo -u $BUILDUSER DEB_BUILD_OPTIONS=\"$DEB_BUILD_OPTIONS\" dpkg-buildpackage"
+	exec_cmd_or_fail "sudo -u $BUILDUSER DEB_BUILD_OPTIONS=\"$DEB_BUILD_OPTIONS\" DEB_BUILD_PROFILES=\"$DEB_BUILD_PROFILES\" dpkg-buildpackage"
 
 	popd &> /dev/null # BUILDDIR
 
