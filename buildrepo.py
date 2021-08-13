@@ -29,7 +29,7 @@ if not sys.version_info >= (3, 5,):
 _ = gettext.gettext
 
 # Script version
-__version__ = '1.4.1'
+__version__ = '1.5.0'
 
 # Disable warnings
 warnings.filterwarnings('ignore')
@@ -251,7 +251,7 @@ class NSPContainer:
     _FIRST_MIRROR = 0
     DEFAULT_DIST_COMPONENTS = ['main', 'contrib', 'non-free']
     DEFAULT_USER_PACKAGES = []
-    CHROOT_REQUIRED_DEBS = ['dpkg-dev', 'fakeroot', 'quilt', 'sudo']
+    CHROOT_REQUIRED_DEBS = ['dpkg-dev', 'fakeroot', 'quilt', 'sudo', 'mount']
     CHROOT_COMPRESSION = 'xz'
 
     class BuildLogger(io.FileIO):
@@ -261,11 +261,38 @@ class NSPContainer:
             data = self._ansi_escape.sub('', data)
             return super().write(data.encode('utf-8', errors='ignore'))
 
-    def __init__(self):
+    def __init__(self, overlay=True):
         self.__conf = Configuration.instance()
         self.__bind_directories = None
         self.__dist_info = ChrootDistributionInfo()
         self.__name = self.__dist_info.get('distro')
+        self.__overlay = overlay
+        self.__overlaydirs = {}
+        self._init_overlay()
+
+    def __del__(self):
+        if not self.__overlay:
+            return
+        cmdargs = [shutil.which('umount'), self.__overlaydirs.get('rootdir')]
+        self._exec_command_log(cmdargs)
+        for key, dirname in self.__overlaydirs.items():
+            if os.path.exists(dirname):
+                shutil.rmtree(dirname)
+
+    def _init_overlay(self):
+        if not self.__overlay:
+            return
+        self.__overlaydirs = {'updir': '{}_up'.format(self.deploypath),
+                              'workdir': '{}_workdir'.format(self.deploypath),
+                              'rootdir': '{}_rootdir'.format(self.deploypath)}
+        for key, dirname in self.__overlaydirs.items():
+            os.makedirs(dirname, exist_ok=True)
+        cmdargs = [shutil.which('mount'), '-t', 'overlay', 'overlay',
+                   '-o', 'lowerdir={},upperdir={},workdir={}'.format(self.deploypath,
+                                                                     self.__overlaydirs.get('updir'),
+                                                                     self.__overlaydirs.get('workdir')),
+                   self.__overlaydirs.get('rootdir')]
+        self._exec_command_log(cmdargs)
 
     @property
     def bind_directories(self):
@@ -283,7 +310,7 @@ class NSPContainer:
             self.__bind_directories = bind_directories
         return self.__bind_directories
 
-    def _exec_command_log(self, cmdargs, log_file, recreate_log=False):
+    def _exec_command_log(self, cmdargs, log_file=None, recreate_log=False):
         def tail(fp, n):
             assert n >= 0
             pos, lines = n + 1, []
@@ -338,6 +365,8 @@ class NSPContainer:
         nspawn_bin = shutil.which('systemd-nspawn')
         if not nspawn_bin:
             exit_with_error(_('systemd-nspawn does not found'))
+        if self.__overlay:
+            container_path = self.__overlaydirs.get('rootdir')
         nspawn_args = [nspawn_bin, '-D', container_path,
                        '-E', 'LC_ALL=C']
         for src, dstinfo in self.bind_directories.items():
@@ -383,14 +412,8 @@ class NSPContainer:
     def name(self):
         return self.__name
 
-    def deploy(self, recreate=False):
-        if self.deployed() and recreate:
-            # TODO:: systemd-nspawn locks
-            try:
-                shutil.rmtree(self.deploypath)
-            except Exception as e:
-                exit_with_error(_('Failed to remove deploy path {}: {}').format(self.deploypath, e))
-        elif self.deployed():
+    def deploy(self):
+        if self.deployed():
             return
         logging.info(_('Deploying {} to {} ...').format(self.__name, self.deploypath))
         with change_directory(self.__conf.chrootsinstdirpath):
@@ -425,7 +448,7 @@ class NSPContainer:
         else:
             logging.info(_('Package {} successfully builded').format(pname))
 
-    def login(self, boot=False, bind=[]):
+    def login(self, bind=[]):
         self.bind_directories
         for directory in bind:
             m = re.match(r'(?P<target>.*):(?P<dest>.*)', directory)
@@ -433,14 +456,12 @@ class NSPContainer:
                 logging.warning(_('Incorrect bind item: {}').format(directory))
                 continue
             self.__bind_directories[m.group('target')] = (m.group('dest'), 'rw')
-        if boot:
-            nspawn_args = ['--boot', '--register=false']
-        else:
-            nspawn_args = ['/bin/bash']
+        nspawn_args = ['/bin/bash']
         returncode = self._exec_nspawn(nspawn_args, self.deploypath, log_file=None)
         logging.info(_('Container {} finished with exit code {}').format(self.name, returncode))
 
     def refresh_repo(self, ctype):
+        self.deploy()
         ctype = PackageType.cache_type_refreshed_map().get(ctype)
         repo_path = '/srv/ospkgs' if ctype == PackageType.PACKAGE_FROM_OS_NB_REPO else '/srv/repo'
         chroot_helper_path = os.path.join('/srv', os.path.basename(self.__conf.chroot_helper))
@@ -1283,8 +1304,8 @@ class RepositoryFullCache:
         self.__caches = []
 
     def load(self):
-        cache_paths = (glob.glob(os.path.join(self.__conf.root, 'cache', self.__conf.distro, '*.cache')) +
-                       glob.glob(os.path.join(self.__conf.cachedirpath, '*.cache')))
+        cache_paths = [*glob.glob(os.path.join(self.__conf.root, 'cache', self.__conf.distro, '*.cache')),
+                       *glob.glob(os.path.join(self.__conf.cachedirpath, '*.cache'))]
         for cache_path in cache_paths:
             self.__caches.append(RepositoryCache.load(self.__conf, cache_path))
         self.__caches = sorted(self.__caches)
@@ -1535,6 +1556,18 @@ class RepoInitializerCmd(BaseCommand):
         logging.info(_('Successfully inited'))
 
 
+class _ChrootCommand(BaseCommand):
+    def __init__(self, conf_path):
+        super().__init__(conf_path)
+        self._dist_chroot = NSPContainer()
+        self._refresh_packages()
+
+    def _refresh_packages(self):
+        for typname, ctype in PackageType.cache_type_refreshed_map().items():
+            logging.info(_('Refreshing Packages cache in repo {} ...').format(typname))
+            self._dist_chroot.refresh_repo(ctype)
+
+
 class BuildCmd(BaseCommand):
     cmd = 'build'
     cmdhelp = _('Builds packages from source list into distro chroot')
@@ -1547,14 +1580,11 @@ class BuildCmd(BaseCommand):
                        'help': _('Specify package(s) for force rebuilding')}),
         ('--rebuild-all', {'required': False, 'action': 'store_true',
                            'default': False, 'help': _('Rebuild all packages in list')}),
-        ('--clean', {'required': False, 'action': 'store_true',
-                     'default': False, 'help': _('Remove installed packages on time of repo initializing')}),
         ('--jobs', {'required': False, 'type': int, 'default': 2, 'help': _('Jobs count for building')})
     )
 
     def __init__(self, conf_path):
         super().__init__(conf_path)
-        self.__distribution_info = ChrootDistributionInfo()
         self.__sources_list = SourcesList(self._conf)
         self.__sources_list.load()
 
@@ -1609,16 +1639,15 @@ class BuildCmd(BaseCommand):
             traceback.print_exc()
             exit_with_error(_('Failed to get binaries for {}').format(package))
 
-    def __make_build(self, jobs, rebuild, clean):
+    def __make_build(self, jobs, rebuild):
         logging.info(_('Following packages are found in build list: \n{}').format(self.__sources_list.build_list_str))
         dist_chroot = NSPContainer()
-        if not dist_chroot.exists():
+        dist_chroot.deploy()
+        if not dist_chroot.deployed():
             exit_with_error(_('Chroot for {} does not created').format(dist_chroot.name))
         for pkgname, version in self.__sources_list.build_list:
             need_building, dscfilepath = self.__check_if_build_required(pkgname, version, rebuild)
             if need_building:
-                # If `--clean`, we should redeploy chroot image
-                dist_chroot.deploy(recreate=clean)
                 # Copy sources to chroot
                 try:
                     full_pkgname = '{} = {}'.format(pkgname, version) if len(version) else pkgname
@@ -1634,8 +1663,6 @@ class BuildCmd(BaseCommand):
                         logging.debug(_('Copying {} to {} ...').format(src, dst))
                         shutil.copy(src, dst)
                 except Exception:
-                    import traceback
-                    traceback.print_exc()
                     exit_with_error(_('Failed to determine sources of package {}').format(pkgname))
                 # Run chroot helper for package building
                 try:
@@ -1647,14 +1674,14 @@ class BuildCmd(BaseCommand):
                     for dst in dst_sources_list:
                         os.remove(dst)
 
-    def run(self, jobs, rebuild, rebuild_all, clean):
+    def run(self, jobs, rebuild, rebuild_all):
         if rebuild_all:
             if len(rebuild):
                 logging.warning(_('Package rebuilding {} ignored, '
                                   'because options --rebuild-all specified').format(', '.join(rebuild)))
             rebuild = [p for p, v in self.__sources_list.build_list]
             logging.warning(_('Will be rebuilded following packages: {}').format(self.__sources_list.build_list_str))
-        self.__make_build(jobs, rebuild, clean)
+        self.__make_build(jobs, rebuild)
 
 
 class MakeRepoCmd(_RepoAnalyzerCmd):
@@ -2156,16 +2183,18 @@ class ChrootLoginCmd(BaseCommand):
     args = (
         ('--deploy', {'required': False, 'action': 'store_true', 'default': False,
                       'help': _('Deploy container instance if not exists, default: False')}),
-        ('--boot', {'required': False, 'action': 'store_true', 'default': False,
-                    'help': _('Run container with boot mode, default: False')}),
+        ('--overlay', {'required': False, 'action': 'store_true', 'default': False,
+                       'help': _('Deploy container with overlay option, default: %(default)s')}),
         ('--bind', {'required': False, 'nargs': '+', 'default': [],
                     'help': _('Additionally mounted directories for chroot (in systemd-nspawn format)')}),
     )
     root_required = True
     required_binaries = ['systemd-nspawn']
 
-    def run(self, boot, deploy, bind):
-        nsconainer = NSPContainer()
+    def run(self, deploy, bind, overlay):
+        nsconainer = NSPContainer(overlay=overlay)
+        if overlay:
+            logging.warning(_('Running container {} with overlay').format(nsconainer.name))
         if not nsconainer.deployed():
             if deploy:
                 nsconainer.deploy()
@@ -2174,7 +2203,7 @@ class ChrootLoginCmd(BaseCommand):
         try:
             # Form bind arg for binding src directory
             bind.append('{}:/srv/src'.format(self._conf.srcdirpath))
-            nsconainer.login(boot, bind)
+            nsconainer.login(bind)
         except Exception as e:
             exit_with_error(e)
 
