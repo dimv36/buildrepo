@@ -29,7 +29,7 @@ if not sys.version_info >= (3, 5,):
 _ = gettext.gettext
 
 # Script version
-__version__ = '1.5.0'
+__version__ = '1.6.0'
 
 # Disable warnings
 warnings.filterwarnings('ignore')
@@ -230,9 +230,7 @@ class ChrootDistributionInfo(dict):
             elif opt_name in ('components', 'debs'):
                 val = self.__to_list(conf.parser.get('chroot', opt_name, fallback=[]))
                 items[opt_name] = val
-            elif opt_name == 'build-user':
-                items[opt_name] = conf.parser.get('chroot', opt_name, fallback=None)
-            elif opt_name == 'distro':
+            elif opt_name in ('build-user', 'distro', 'init-scripts-dir'):
                 items[opt_name] = conf.parser.get('chroot', opt_name, fallback=None)
         mirrors = self.__parse_mirrors(mirrors)
         if len(mirrors):
@@ -377,6 +375,13 @@ class NSPContainer:
                 nspawn_args.append('--bind={}:{}'.format(src, dst))
             else:
                 logging.error(_('Incorrect bind mode: {}').format(mode))
+        init_scripts_dir = self.__dist_info.get('init-scripts-dir')
+        if init_scripts_dir:
+            absdir = os.path.abspath(init_scripts_dir)
+            if not os.path.exists(absdir) or not os.path.isdir(absdir):
+                logging.error(_('\'{}\' - no such directory').format(absdir))
+            else:
+                nspawn_args.append('--bind-ro={}:/srv/init'.format(os.path.abspath(init_scripts_dir)))
         nspawn_args += cmdargs
         return self._exec_command_log(nspawn_args, log_file, recreate_log)
 

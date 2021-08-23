@@ -32,8 +32,33 @@ function refresh_repo()
 }
 
 
+function exec_init_scripts()
+{
+	INIT_SCRIPTS_DIR="/srv/init"
+	if [[ -d "$INIT_SCRIPTS_DIR" ]]
+	then
+		for script in `ls -1 "$INIT_SCRIPTS_DIR"`
+		do
+			fullpath="$INIT_SCRIPTS_DIR/$script"
+			echo "INIT: Executing \"$fullpath\" ..."
+			/bin/bash "$fullpath"
+			err=$?
+			if [[ "$?" -ne "0" ]]
+			then
+				echo "INIT: Script \"$fullpath\" failed with code $err"
+			else
+				echo "INIT: Script \"$fullpath\" succeeded"
+			fi
+		done
+	fi
+	return 0
+}
+
+
 function cmd_build
 {
+	exec_init_scripts
+
 	source runtime-environment
 
 	DSCFILE=$1
