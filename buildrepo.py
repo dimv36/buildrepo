@@ -29,7 +29,7 @@ if not sys.version_info >= (3, 5,):
 _ = gettext.gettext
 
 # Script version
-__version__ = '1.6.0'
+__version__ = '1.6.1'
 
 # Disable warnings
 warnings.filterwarnings('ignore')
@@ -285,6 +285,8 @@ class NSPContainer:
                               'rootdir': '{}_rootdir'.format(self.deploypath)}
         for key, dirname in self.__overlaydirs.items():
             os.makedirs(dirname, exist_ok=True)
+        cmdargs = [shutil.which('modprobe'), 'overlay']
+        self._exec_command_log(cmdargs)
         cmdargs = [shutil.which('mount'), '-t', 'overlay', 'overlay',
                    '-o', 'lowerdir={},upperdir={},workdir={}'.format(self.deploypath,
                                                                      self.__overlaydirs.get('updir'),
