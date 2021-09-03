@@ -515,6 +515,7 @@ class NSPContainer:
             with open(chroot_apt_sources, mode='w') as apt_sources:
                 # Our building repository
                 apt_sources.write('deb file:///srv repo/\n')
+                apt_sources.write('deb file:///srv ospkgs/\n')
                 mirror_num = self._FIRST_MIRROR
                 components = ' '.join(components)
                 for url in mirrors:
