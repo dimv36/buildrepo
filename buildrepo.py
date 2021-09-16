@@ -29,7 +29,7 @@ if not sys.version_info >= (3, 5,):
 _ = gettext.gettext
 
 # Script version
-__version__ = '1.6.1'
+__version__ = '1.6.2'
 
 # Disable warnings
 warnings.filterwarnings('ignore')
@@ -259,17 +259,15 @@ class NSPContainer:
             data = self._ansi_escape.sub('', data)
             return super().write(data.encode('utf-8', errors='ignore'))
 
-    def __init__(self, overlay=True):
+    def __init__(self, overlay=False):
         self.__conf = Configuration.instance()
         self.__bind_directories = None
         self.__dist_info = ChrootDistributionInfo()
         self.__name = self.__dist_info.get('distro')
-        self.__overlay = overlay
         self.__overlaydirs = {}
-        self._init_overlay()
 
     def __del__(self):
-        if not self.__overlay:
+        if not self.__overlaydirs:
             return
         cmdargs = [shutil.which('umount'), self.__overlaydirs.get('rootdir')]
         self._exec_command_log(cmdargs)
@@ -277,8 +275,8 @@ class NSPContainer:
             if os.path.exists(dirname):
                 shutil.rmtree(dirname)
 
-    def _init_overlay(self):
-        if not self.__overlay:
+    def _init_overlay(self, overlay):
+        if not overlay:
             return
         self.__overlaydirs = {'updir': '{}_up'.format(self.deploypath),
                               'workdir': '{}_workdir'.format(self.deploypath),
@@ -365,8 +363,7 @@ class NSPContainer:
         nspawn_bin = shutil.which('systemd-nspawn')
         if not nspawn_bin:
             exit_with_error(_('systemd-nspawn does not found'))
-        if self.__overlay:
-            container_path = self.__overlaydirs.get('rootdir')
+        container_path = self.__overlaydirs.get('rootdir') or container_path
         nspawn_args = [nspawn_bin, '-D', container_path,
                        '-E', 'LC_ALL=C']
         for src, dstinfo in self.bind_directories.items():
@@ -433,6 +430,8 @@ class NSPContainer:
                 exit_with_error(_('Chroot deployment {} failed: {}').format(self.__name, e))
 
     def build_package(self, dsc_file_path, jobs):
+        # Init overlay
+        self._init_overlay(True)
         # First, we should generate environment file,
         # which is used by chroot-helper
         try:
@@ -455,7 +454,9 @@ class NSPContainer:
         else:
             logging.info(_('Package {} successfully builded').format(pname))
 
-    def login(self, bind=[]):
+    def login(self, bind=[], overlay=False):
+        # Init overlay
+        self._init_overlay(overlay)
         self.bind_directories
         for directory in bind:
             m = re.match(r'(?P<target>.*):(?P<dest>.*)', directory)
@@ -2200,7 +2201,7 @@ class ChrootLoginCmd(BaseCommand):
     required_binaries = ['systemd-nspawn']
 
     def run(self, deploy, bind, overlay):
-        nsconainer = NSPContainer(overlay=overlay)
+        nsconainer = NSPContainer()
         if overlay:
             logging.warning(_('Running container {} with overlay').format(nsconainer.name))
         if not nsconainer.deployed():
@@ -2211,7 +2212,7 @@ class ChrootLoginCmd(BaseCommand):
         try:
             # Form bind arg for binding src directory
             bind.append('{}:/srv/src'.format(self._conf.srcdirpath))
-            nsconainer.login(bind)
+            nsconainer.login(bind, overlay=overlay)
         except Exception as e:
             exit_with_error(e)
 
