@@ -29,7 +29,7 @@ if not sys.version_info >= (3, 5,):
 _ = gettext.gettext
 
 # Script version
-__version__ = '1.6.2'
+__version__ = '1.6.3'
 
 # Disable warnings
 warnings.filterwarnings('ignore')
@@ -285,12 +285,13 @@ class NSPContainer:
             os.makedirs(dirname, exist_ok=True)
         cmdargs = [shutil.which('modprobe'), 'overlay']
         self._exec_command_log(cmdargs)
-        cmdargs = [shutil.which('mount'), '-t', 'overlay', 'overlay',
-                   '-o', 'lowerdir={},upperdir={},workdir={}'.format(self.deploypath,
-                                                                     self.__overlaydirs.get('updir'),
-                                                                     self.__overlaydirs.get('workdir')),
-                   self.__overlaydirs.get('rootdir')]
-        self._exec_command_log(cmdargs)
+        if not os.path.ismount(self.__overlaydirs.get('rootdir')):
+            cmdargs = [shutil.which('mount'), '-t', 'overlay', 'overlay',
+                       '-o', 'lowerdir={},upperdir={},workdir={}'.format(self.deploypath,
+                                                                         self.__overlaydirs.get('updir'),
+                                                                         self.__overlaydirs.get('workdir')),
+                       self.__overlaydirs.get('rootdir')]
+            self._exec_command_log(cmdargs)
 
     @property
     def bind_directories(self):
@@ -1560,8 +1561,9 @@ class RepoInitializerCmd(BaseCommand):
             logging.info(_('Creating directory {} ...').format(directory))
             os.makedirs(directory, exist_ok=True)
         # Touch Packages in repository dir
-        with open(os.path.join(self._conf.repodirpath, 'Packages'), mode='w'):
-            pass
+        for subdir in [self._conf.repodirpath, self._conf.ospkgsdirpath]:
+            with open(os.path.join(subdir, 'Packages'), mode='w'):
+                pass
         logging.info(_('Successfully inited'))
 
 
