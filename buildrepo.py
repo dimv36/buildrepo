@@ -3,6 +3,7 @@
 import os
 import sys
 import logging
+import atexit
 import re
 import gettext
 import glob
@@ -249,7 +250,7 @@ class NSPContainer:
     _FIRST_MIRROR = 0
     DEFAULT_DIST_COMPONENTS = ['main', 'contrib', 'non-free']
     DEFAULT_USER_PACKAGES = []
-    CHROOT_REQUIRED_DEBS = ['dpkg-dev', 'fakeroot', 'quilt', 'sudo', 'mount']
+    CHROOT_REQUIRED_DEBS = ['dpkg-dev', 'fakeroot', 'quilt', 'sudo', 'mount', 'gpg2']
     CHROOT_COMPRESSION = 'xz'
 
     class BuildLogger(io.FileIO):
@@ -263,7 +264,7 @@ class NSPContainer:
         self.__conf = Configuration.instance()
         self.__bind_directories = None
         self.__dist_info = ChrootDistributionInfo()
-        self.__name = self.__dist_info.get('distro')
+        self._name = self.__dist_info.get('distro')
         self.__overlaydirs = {}
 
     def __del__(self):
@@ -388,11 +389,11 @@ class NSPContainer:
     @property
     def chroot_path(self):
         return os.path.join(self.__conf.chrootsdirpath, '{}.tar.{}'.format(
-            self.__name, self.CHROOT_COMPRESSION))
+            self._name, self.CHROOT_COMPRESSION))
 
     @property
     def hostname(self):
-        return '{}_{}'.format(self.__conf.reponame, self.__name)
+        return '{}_{}'.format(self.__conf.reponame, self._name)
 
     @property
     def deploypath(self):
@@ -415,20 +416,20 @@ class NSPContainer:
 
     @property
     def name(self):
-        return self.__name
+        return self._name
 
     def deploy(self):
         if self.deployed():
             return
-        logging.info(_('Deploying {} to {} ...').format(self.__name, self.deploypath))
+        logging.info(_('Deploying {} to {} ...').format(self._name, self.deploypath))
         with change_directory(self.__conf.chrootsinstdirpath):
             try:
                 with self.tarfile.open(self.chroot_path,
                                        mode='r:{}'.format(self.CHROOT_COMPRESSION)) as tf:
                     tf.extractall()
-                shutil.move(self.__name, self.hostname)
+                shutil.move(self._name, self.hostname)
             except Exception as e:
-                exit_with_error(_('Chroot deployment {} failed: {}').format(self.__name, e))
+                exit_with_error(_('Chroot deployment {} failed: {}').format(self._name, e))
 
     def build_package(self, dsc_file_path, jobs):
         # Init overlay
@@ -497,7 +498,7 @@ class NSPContainer:
             debootstrap_args = [debootstrap_bin,
                                 '--no-check-gpg', '--verbose', '--variant=minbase',
                                 '--components={}'.format(','.join(components)),
-                                self.__name, dist_chroot_dir,
+                                self._name, dist_chroot_dir,
                                 mirrors[0]]
             chroot_script = self.__dist_info.get('chroot-script')
             if chroot_script:
@@ -581,7 +582,7 @@ class NSPContainer:
             user_selected_packages = self.__dist_info.get('debs', [])
             if len(user_selected_packages):
                 logging.info(_('Installing user defined packages {} in chroot {} ...').format(
-                    ', '.join(user_selected_packages), self.__name))
+                    ', '.join(user_selected_packages), self._name))
                 returncode = self._exec_nspawn(['apt-get', 'install'] + user_selected_packages,
                                                dist_chroot_dir, logpath)
                 if returncode:
@@ -838,6 +839,7 @@ class DependencyFinder:
                 m = re.match(vre, p)
                 if m:
                     versions.append(m.group('version'))
+                    break
         if not len(packages):
             exit_with_error(_('Failed to find package {} in repo').format(pkgname))
         elif len(packages) > 1:
@@ -921,18 +923,20 @@ class DebianIsoRepository(_BaseIsoReposisory):
     import platform
     _ISO_VOLID_MAXLEN = 32
 
-    def __init__(self, tmpdir, is_dev):
+    def __init__(self, tmpdir, is_dev=False, gpg_fingerprint=None):
         super(DebianIsoRepository, self).__init__(tmpdir)
-        self.__is_dev = is_dev
-        self.__name = self._conf.reponame
-        if self.__is_dev:
-            self.__name = '{}-devel'.format(self.__name)
-        self.__reprepro_bin = None
-        self.__arch = None
-        self.__base_init()
+        self._is_dev = is_dev
+        self._name = self._conf.reponame
+        if self._is_dev:
+            self._name = '{}-devel'.format(self._name)
+        self._reprepro_bin = None
+        self._arch = self.platform.machine()
+        self._arch = 'amd64' if self._arch == 'x86_64' else self._arch
+        self._gpg_fingerprint = gpg_fingerprint
+        self._base_init()
 
     def _subdir(self):
-        repotype = 'main' if not self.__is_dev else 'dev'
+        repotype = 'main' if not self._is_dev else 'dev'
         return '{}_{}_iso'.format(self._conf.reponame, repotype)
 
     def _iso_type(self):
@@ -944,7 +948,7 @@ class DebianIsoRepository(_BaseIsoReposisory):
                      '{}-devel {}'.format(name, version))
         return all(map(lambda x: len(x) < DebianIsoRepository._ISO_VOLID_MAXLEN, reponames))
 
-    def __base_init(self):
+    def _base_init(self):
         conf_directory = os.path.join(self.repodir, 'conf')
         os.makedirs(conf_directory, exist_ok=True)
         with open(os.path.join(conf_directory, 'distributions'), mode='w') as fp:
@@ -952,54 +956,52 @@ class DebianIsoRepository(_BaseIsoReposisory):
             fp.write('Codename: {}\n'.format(self._conf.distro))
             fp.write('Suite: {}\n'.format(self._conf.distro))
             fp.write('Version: {}\n'.format(self._conf.repoversion))
-            self.__arch = self.platform.machine()
-            if self.__arch == 'x86_64':
-                self.__arch = 'amd64'
-            fp.write('Architectures: {}\n'.format(self.__arch))
+            fp.write('Architectures: {}\n'.format(self._arch))
+            if self._gpg_fingerprint:
+                fp.write('SignWith: {}\n'.format(self._gpg_fingerprint))
             fp.writelines(['Components: main contrib non-free\n',
                            'DebIndices: Packages Release . .gz .bz2\n',
                            'Contents: . .gz .bz2\n'])
-        self.__reprepro_bin = shutil.which('reprepro')
-        if self.__reprepro_bin is None:
+        self._reprepro_bin = shutil.which('reprepro')
+        if self._reprepro_bin is None:
             exit_with_error(_('Failed to find reprepro binary'))
         with change_directory(self.repodir):
-            if not self._run_command_log([self.__reprepro_bin, 'export']):
+            if not self._run_command_log([self._reprepro_bin, 'export']):
                 exit_with_error(_('Reprepro initialization failed'))
         disk_directory = os.path.join(self.repodir, '.disk')
         os.makedirs(disk_directory, exist_ok=True)
         with open(os.path.join(disk_directory, 'info'), mode='w') as fp:
-            fp.write('{reponame} {version} ({distro}) - {arch} DVD\n'.format(reponame=self.__name,
+            fp.write('{reponame} {version} ({distro}) - {arch} DVD\n'.format(reponame=self._name,
                                                                              version=self._conf.repoversion,
                                                                              distro=self._conf.distro,
-                                                                             arch=self.__arch))
+                                                                             arch=self._arch))
 
     def create(self, packagesdir, includes, touch_dt):
         with change_directory(self.repodir):
-            logging.info(_('Creating repository for {} via reprepro ...').format(self.__name))
+            logging.info(_('Creating repository for {} via reprepro ...').format(self._name))
             for package in glob.glob('{}/*.deb'.format(packagesdir)):
-                if not self._run_command_log([self.__reprepro_bin, 'includedeb',
+                if not self._run_command_log([self._reprepro_bin, 'includedeb',
                                               self._conf.distro, package]):
                     exit_with_error(_('Including binaries to repo failure'))
             for directory in ['db', 'conf']:
                 shutil.rmtree(directory)
             # Build label
             with open('buildinfo', mode='w') as fp:
-                fp.write('{repo} {version} ({distro}) {arch} at {date}\n'.format(repo=self.__name,
-                                                                                 version=self._conf.repoversion,
-                                                                                 distro=self._conf.distro,
-                                                                                 arch=self.__arch,
-                                                                                 date=self.fmtdate(touch_dt, True)))
+                signed_label = '' if not self._gpg_fingerprint else ' (signed)'
+                fp.write('{repo} {version} ({distro}) {arch} at {date}{signed_label}\n'.format(
+                    repo=self._name, version=self._conf.repoversion, distro=self._conf.distro,
+                    arch=self._arch, date=self.fmtdate(touch_dt, True), signed_label=signed_label))
             for req in includes:
                 dst = os.path.join(self.repodir, os.path.basename(req))
                 shutil.copyfile(req, dst)
                 shutil.copymode(req, dst)
-        isoname = '{repo}_{version}_{distro}_{date}.iso'.format(repo=self.__name,
+        isoname = '{repo}_{version}_{distro}_{date}.iso'.format(repo=self._name,
                                                                 version=self._conf.repoversion,
                                                                 distro=self._conf.distro,
                                                                 date=self.fmtdate(touch_dt))
         isopath = os.path.join(self._conf.isodirpath, isoname)
-        iso_label = '{repo} {version}'.format(repo=self.__name, version=self._conf.repoversion)
-        self._make_iso(isopath, self.__name, iso_label, touch_dt)
+        iso_label = '{repo} {version}'.format(repo=self._name, version=self._conf.repoversion)
+        self._make_iso(isopath, self._name, iso_label, touch_dt)
         return isopath
 
 
@@ -1082,24 +1084,24 @@ class RepositoryCache:
 
     def __init__(self, conf, name, ctype, packages=[]):
         self.__conf = conf
-        self.__name = name
+        self._name = name
         self.__ctype = ctype
         if self.__ctype not in (PackageType.PACKAGE_FROM_OS_REPO,
                                 PackageType.PACKAGE_FROM_OS_DEV_REPO):
             self.__cache_path = os.path.join(self.__conf.cachedirpath,
-                                             '{}.cache'.format(self.__name))
+                                             '{}.cache'.format(self._name))
         else:
-            cache_path = os.path.join(self.__conf.cachedirpath, '..', '{}.cache'.format(self.__name))
+            cache_path = os.path.join(self.__conf.cachedirpath, '..', '{}.cache'.format(self._name))
             self.__cache_path = os.path.abspath(cache_path)
-        self.__packages = packages
+        self._packages = packages
 
     def __repr__(self):
         return '{classname}: {name} ({type})'.format(classname=self.__class__.__name__,
-                                                     name=self.__name,
+                                                     name=self._name,
                                                      type=self.__ctype)
 
     def __len__(self):
-        return len(self.__packages)
+        return len(self._packages)
 
     def __lt__(self, other):
         return self.__ctype < other.__ctype
@@ -1114,15 +1116,15 @@ class RepositoryCache:
 
     @property
     def name(self):
-        return self.__name
+        return self._name
 
     @property
     def pkginfo(self):
-        return self.__packages
+        return self._packages
 
     @property
     def packages(self):
-        return (sorted(p.get('package') for p in self.__packages if not p['virtual']))
+        return (sorted(p.get('package') for p in self._packages if not p['virtual']))
 
     def create(self, packages_path):
         version_fix_re = r'(?P<name>.*) \((?P<sversion>.*)\)'
@@ -1201,11 +1203,11 @@ class RepositoryCache:
                         packages += process_line_buffer(line_buffer)
                         line_buffer.clear()
                 idx_line += 1
-        self.__packages = packages
+        self._packages = packages
         with open(self.__cache_path, mode='w') as out:
-            cache_obj = {'name': self.__name,
+            cache_obj = {'name': self._name,
                          'ctype': self.__ctype,
-                         'packages': self.__packages}
+                         'packages': self._packages}
             out.write(self.json.dumps(cache_obj, sort_keys=True, indent=4))
         return len(self)
 
@@ -1239,7 +1241,7 @@ class RepositoryCache:
 
     def __process_virtual_dependency(self, vdep):
         vpkgname, vdepver, vdepop = vdep
-        for pkginfo in self.__packages:
+        for pkginfo in self._packages:
             pkgname, pkgver = pkginfo.get('package'), pkginfo.get('version', '')
             if pkgname == vpkgname:
                 if self.__check_dep(pkgver, vdepver, vdepop):
@@ -1258,7 +1260,7 @@ class RepositoryCache:
             return m.group('realver') if m else ver
 
         depname, depver, depop = dep
-        for pkginfo in self.__packages:
+        for pkginfo in self._packages:
             pkgname, pkgver = pkginfo.get('package'), pkginfo.get('version')
             if pkgname == depname:
                 is_virtual = pkginfo.get('virtual')
@@ -1284,7 +1286,7 @@ class RepositoryCache:
 
     def binaries_for_source(self, source, version):
         binaries = []
-        for pkginfo in self.__packages:
+        for pkginfo in self._packages:
             pkgsource, pkgver = pkginfo.get('source'), pkginfo.get('version')
             if pkgsource == source and pkgver == version:
                 binaries.append((pkginfo.get('package'),
@@ -1293,7 +1295,7 @@ class RepositoryCache:
         return binaries
 
     def source_package(self, binary_package, version):
-        for pkginfo in self.__packages:
+        for pkginfo in self._packages:
             pkgname = pkginfo.get('package')
             pkgver = pkginfo.get('version')
             real_pkg = pkginfo.get('real_package')
@@ -1375,11 +1377,11 @@ class SourcesList:
         sources_list_path = os.path.abspath(sources_list_path)
         if not os.path.exists(sources_list_path):
             exit_with_error(_('File {} does not exists').format(sources_list_path))
-        self.__sources_list_path = sources_list_path
+        self._sources_list_path = sources_list_path
 
     def load(self):
-        logging.info(_('Loading sources list from {} ...').format(self.__sources_list_path))
-        with open(self.__sources_list_path) as fp:
+        logging.info(_('Loading sources list from {} ...').format(self._sources_list_path))
+        with open(self._sources_list_path) as fp:
             for line in fp.readlines():
                 line = line.strip()
                 if line.startswith('#') or not len(line):
@@ -1390,10 +1392,10 @@ class SourcesList:
                 elif len(tokens) == 2:
                     self.__build_list.append((tokens[self.SL_PKGNAME], tokens[self.SL_PKGVERSION]))
                 else:
-                    logging.warning(_('Mailformed line {} in {}').format(line, self.__sources_list_path))
+                    logging.warning(_('Mailformed line {} in {}').format(line, self._sources_list_path))
                     continue
         if not len(self.__build_list):
-            logging.warning(_('No one sources are found in {}').format(self.__sources_list_path))
+            logging.warning(_('No one sources are found in {}').format(self._sources_list_path))
             exit(0)
 
     @property
@@ -1402,7 +1404,7 @@ class SourcesList:
 
     @property
     def path(self):
-        return self.__sources_list_path
+        return self._sources_list_path
 
     @property
     def build_list_str(self):
@@ -1596,8 +1598,8 @@ class BuildCmd(BaseCommand):
 
     def __init__(self, conf_path):
         super().__init__(conf_path)
-        self.__sources_list = SourcesList(self._conf)
-        self.__sources_list.load()
+        self._sources_list = SourcesList(self._conf)
+        self._sources_list.load()
 
     def __check_if_build_required(self, package, version, force_rebuild_list):
         if len(version):
@@ -1651,12 +1653,12 @@ class BuildCmd(BaseCommand):
             exit_with_error(_('Failed to get binaries for {}').format(package))
 
     def __make_build(self, jobs, rebuild):
-        logging.info(_('Following packages are found in build list: \n{}').format(self.__sources_list.build_list_str))
+        logging.info(_('Following packages are found in build list: \n{}').format(self._sources_list.build_list_str))
         dist_chroot = NSPContainer()
         dist_chroot.deploy()
         if not dist_chroot.deployed():
             exit_with_error(_('Chroot for {} does not created').format(dist_chroot.name))
-        for pkgname, version in self.__sources_list.build_list:
+        for pkgname, version in self._sources_list.build_list:
             need_building, dscfilepath = self.__check_if_build_required(pkgname, version, rebuild)
             if need_building:
                 # Copy sources to chroot
@@ -1690,24 +1692,25 @@ class BuildCmd(BaseCommand):
             if len(rebuild):
                 logging.warning(_('Package rebuilding {} ignored, '
                                   'because options --rebuild-all specified').format(', '.join(rebuild)))
-            rebuild = [p for p, v in self.__sources_list.build_list]
-            logging.warning(_('Will be rebuilded following packages: {}').format(self.__sources_list.build_list_str))
+            rebuild = [p for p, v in self._sources_list.build_list]
+            logging.warning(_('Will be rebuilded following packages: {}').format(self._sources_list.build_list_str))
         self.__make_build(jobs, rebuild)
 
 
 class MakeRepoCmd(_RepoAnalyzerCmd):
     cmd = 'make-repo'
     cmdhelp = _('Creates repositories (main, devel and source) in reprepro format')
-    required_binaries = ['reprepro', 'xorrisofs']
+    required_binaries = ['reprepro', 'xorrisofs', 'gpg2']
     _DEFAULT_DEV_PACKAGES_SUFFIXES = ['dbg', 'dbgsym', 'doc', 'dev']
     _TOUCH_DT_FMT = '%d.%m.%Y %H:%M'
 
     def __init__(self, conf_path):
         super().__init__(conf_path)
         # Sources
-        self.__sources_include = self.__parse_includes('source-include')
-        self.__binary_include = self.__parse_includes('binary-include')
-        self.__packages = {}
+        self._sources_include = self._parse_includes('source-include')
+        self._binary_include = self._parse_includes('binary-include')
+        self._gpg2bin = shutil.which('gpg2')
+        self._packages = {}
         # white list
         white_list = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'white-list', fallback=None)
         if not white_list:
@@ -1715,23 +1718,67 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         white_list = os.path.abspath(white_list)
         if not os.path.exists(white_list):
             exit_with_error(_('File {} does not exist').format(white_list))
-        self.__parse_white_list(white_list)
+        self._parse_white_list(white_list)
         # dev packages suffixes
-        self.__dev_packages_suffixes = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'dev-package-suffixes',
-                                                             fallback=MakeRepoCmd._DEFAULT_DEV_PACKAGES_SUFFIXES)
-        if isinstance(self.__dev_packages_suffixes, str):
-            self.__dev_packages_suffixes = [item.strip() for item in self.__dev_packages_suffixes.split(',')]
+        self._dev_packages_suffixes = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'dev-package-suffixes',
+                                                            fallback=MakeRepoCmd._DEFAULT_DEV_PACKAGES_SUFFIXES)
+        if isinstance(self._dev_packages_suffixes, str):
+            self._dev_packages_suffixes = [item.strip() for item in self._dev_packages_suffixes.split(',')]
         logging.info(_('Using {} rule for packages for 2nd disk').format(
-            ', '.join(self.__dev_packages_suffixes)))
+            ', '.join(self._dev_packages_suffixes)))
         # drop dbg packages
-        self.__drop_dbg_packages = self._conf.parser.getboolean(_RepoAnalyzerCmd.alias,
-                                                                'drop-dbg-packages', fallback=True)
+        self._drop_dbg_packages = self._conf.parser.getboolean(_RepoAnalyzerCmd.alias,
+                                                               'drop-dbg-packages', fallback=True)
         # touch dt
-        self.__touch_dt = self.__get_touch_dt()
+        self._touch_dt = self._get_touch_dt()
         # hashsums
-        self.__hashinfo = self.__parse_hash_info()
+        self._hashinfo = self._parse_hash_info()
+        self._apt_sign_key = self._get_apt_gpg_key()
 
-    def __parse_includes(self, param):
+    def _get_apt_gpg_key(self):
+        def atexit_delete_key(fingerprint):
+            try:
+                cmdargs = [self._gpg2bin, '--delete-secret-keys',
+                           '--batch', '--yes', fingerprint]
+                out = subprocess.check_call(cmdargs,
+                                            stderr=subprocess.STDOUT)
+            except subprocess.CalledProcessError:
+                logging.error(_('Failed to remove GPG key \'{}\': {}').format(keyid, out))
+
+        enabled = self._conf.parser.getboolean(_RepoAnalyzerCmd.alias, 'apt-sign-repo', fallback=False)
+        if not enabled:
+            return
+        gpg_key_path = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'apt-gpg-key', fallback=None)
+        if not gpg_key_path:
+            exit_with_error(_('Apt repo signing is enabled, but \'{}\' not set').format('apt-gpg-key'))
+        gpg_key_path = os.path.abspath(gpg_key_path)
+        if not os.path.exists(gpg_key_path):
+            exit_with_error(_('GPG key at \'{}\' not exists').format('apt-gpg-key'))
+        # Try to import gpg key
+        cmdargs = [self._gpg2bin, '--import', gpg_key_path]
+        p = subprocess.Popen(cmdargs,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT,
+                             universal_newlines=True,
+                             env={'LC_ALL': 'C'})
+        stdout, unused = p.communicate()
+        if p.returncode:
+            exit_with_error(_('GPG key import failure: {}').format(stdout))
+        m = re.match(r'^gpg: key (?P<keyid>\w+):', stdout)
+        keyid = m.group('keyid')
+        # Get apt sign key
+        try:
+            fingerprint = subprocess.check_output('{} --list-secret-keys | grep {}'.format(self._gpg2bin, keyid),
+                                                  stderr=subprocess.PIPE,
+                                                  shell=True,
+                                                  universal_newlines=True).strip()
+        except subprocess.CalledProcessError as e:
+            exit_with_error(_('Failed to get apt GPG sign key: {}').format(e))
+        logging.info(_('Using GPG sign key \'{}\'').format(fingerprint))
+        atexit.register(atexit_delete_key, fingerprint)
+        return fingerprint
+
+    def _parse_includes(self, param):
         sources_include = self._conf.parser.get(MakeRepoCmd.alias, param, fallback=[])
         if isinstance(sources_include, str):
             sources_include = sources_include.split(',')
@@ -1744,7 +1791,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                 exit_with_error(_('File {} does not exists').format(abspath))
         return sources
 
-    def __parse_white_list(self, white_list_path):
+    def _parse_white_list(self, white_list_path):
         i = 1
         last_section = None
         for line in open(white_list_path, mode='r').readlines():
@@ -1754,29 +1801,29 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             line = line.rstrip('\n')
             if line.startswith('[') and line.endswith(']'):
                 last_section = line[1:-1]
-                self.__packages[last_section] = []
+                self._packages[last_section] = []
             else:
                 if last_section is None:
                     exit_with_error(_('Got package at line {}, '
                                       'but section expected').format(i))
-                packages = self.__packages.get(last_section)
+                packages = self._packages.get(last_section)
                 if line in packages:
                     logging.warning(_('Package {} already in {}, skipped').format(line, last_section))
                     continue
                 packages.append(line)
-                self.__packages[last_section] = packages
-        if 'target' not in self.__packages:
+                self._packages[last_section] = packages
+        if 'target' not in self._packages:
             exit_with_error(_('White list for target repository is empty'))
         # Intersection check
         all_pkgs = set()
-        for section, packages in self.__packages.items():
+        for section, packages in self._packages.items():
             if not len(all_pkgs):
                 all_pkgs = set(packages)
                 continue
             if (all_pkgs & set(packages)):
                 exit_with_error(_('Intersection is found in lists'))
 
-    def __get_touch_dt(self):
+    def _get_touch_dt(self):
         value = self._conf.parser.get(_RepoAnalyzerCmd.alias,
                                       'creation-timestamp', fallback=None)
         if value is not None:
@@ -1790,7 +1837,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         logging.info(_('Using timestamp {} for repositories ...').format(dtstr))
         return dt
 
-    def __parse_hash_info(self):
+    def _parse_hash_info(self):
         hashinfo = {}
         if not self._conf.parser.has_section('hashsums'):
             return hashinfo
@@ -1801,7 +1848,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
             hashinfo[key] = binpath
         return hashinfo
 
-    def __sources(self, pkg, version):
+    def _sources(self, pkg, version):
         source = self._builded_cache.source_package(pkg, version)
         if source is None:
             exit_with_error(_('Failed to find sources for {} = {}').format(pkg, version))
@@ -1818,31 +1865,31 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         dscfile = apt.debfile.DscSrcPackage(filename=dscfilepath)
         return tuple(dscfile.filelist + [os.path.basename(dscfilepath)])
 
-    def __skip_dbg_package(self, pkgname):
-        if not self.__drop_dbg_packages:
+    def _skip_dbg_package(self, pkgname):
+        if not self._drop_dbg_packages:
             return False
         if pkgname.endswith('-dbgsym') or pkgname.endswith('-dbg'):
             return True
         return False
 
-    def __log_stage(self, msg):
+    def _log_stage(self, msg):
         logging.info('=' * len(msg))
         logging.info(msg)
         logging.info('=' * len(msg))
 
-    def __generate_iso_hash_sums(self, isopaths):
-        if not len(self.__hashinfo):
+    def _generate_iso_hash_sums(self, isopaths):
+        if not self._hashinfo:
             return
         with change_directory(self._conf.isodirpath):
-            for hashalgo, binary in self.__hashinfo.items():
+            for hashalgo, binary in self._hashinfo.items():
                 sumspath = '{}_{}_{}_{}.{}.sums'.format(self._conf.reponame,
                                                         self._conf.repoversion,
                                                         self._conf.distro,
-                                                        self.__touch_dt.strftime('%Y-%m-%d'),
+                                                        self._touch_dt.strftime('%Y-%m-%d'),
                                                         hashalgo)
                 hashfile = os.path.join(self._conf.isodirpath, sumspath)
                 fp = open(hashfile, mode='w')
-                self.__log_stage(_('Generating hash sums ({}) ...').format(hashalgo))
+                self._log_stage(_('Generating hash sums ({}) ...').format(hashalgo))
                 for isopath in isopaths:
                     basename = os.path.basename(isopath)
                     with subprocess.Popen((binary, basename),
@@ -1853,7 +1900,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                 logging.info(_('Hash sums (algo {}) saved to {}').format(hashalgo, hashfile))
 
     def run(self):
-        self.__log_stage(_('Processing target repository ...'))
+        self._log_stage(_('Processing target repository ...'))
         target_builded_deps = set()
         sources = dict()
         tmpdirpath = TemporaryDirManager.instance().create()
@@ -1862,11 +1909,11 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         fsrcdirpath = os.path.join(tmpdirpath, '{}_src'.format(self._conf.reponame))
         for subdir in (frepodirpath, frepodevdirpath, fsrcdirpath):
             os.makedirs(subdir, exist_ok=True)
-        for required in self.__packages['target']:
+        for required in self._packages['target']:
             logging.info(_('Processing {} ...').format(required))
             deps = self._get_depends_for_package(required,
-                                                 exclude_rules=self.__dev_packages_suffixes,
-                                                 black_list=self.__packages.get('target-dev', []))
+                                                 exclude_rules=self._dev_packages_suffixes,
+                                                 black_list=self._packages.get('target-dev', []))
             unresolve = list(filter(lambda e: e[DependencyFinder.DF_DEST] == PackageType.PACKAGE_NOT_FOUND, deps))
             deps_in_dev = list(filter(lambda e: e[DependencyFinder.DF_DEST] in
                                       (PackageType.PACKAGE_FROM_OS_DEV_REPO, PackageType.PACKAGE_FROM_EXT_DEV_REPO),
@@ -1887,7 +1934,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                     source_key = '{}_{}'.format(*resolved)
                     if source_key in sources.keys():
                         continue
-                    sources[source_key] = self.__sources(*resolved)
+                    sources[source_key] = self._sources(*resolved)
                 # Binary packages for copying
                 glob_copy_re = os.path.join(self._conf.repodirpath, '{}_{}*.deb'.format(*resolved))
                 glob_copy_nb_re = os.path.join(self._conf.ospkgsdirpath, '{}_{}*.deb'.format(*resolved))
@@ -1905,7 +1952,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                     shutil.copyfile(f, dst)
                 except Exception as e:
                     exit_with_error(e)
-        self.__log_stage(_('Processing dev repository ...'))
+        self._log_stage(_('Processing dev repository ...'))
         # Determine packages for second disk
         dev_packages = []
         for f in os.listdir(self._conf.repodirpath):
@@ -1918,7 +1965,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         dev_packages = sorted([p for p in (set(dev_packages) - set(target_packages))])
         for devpkg in dev_packages:
             logging.info(_('Processing {} ...').format(devpkg))
-            if self.__skip_dbg_package(devpkg):
+            if self._skip_dbg_package(devpkg):
                 logging.warning(_('Skipping {} because skipping packages with debug info is on').format(devpkg))
                 continue
             deps = self._get_depends_for_package(devpkg, flags=DependencyFinder.FLAG_FINDER_DEV)
@@ -1943,7 +1990,7 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                 source_key = '{}_{}'.format(*resolved)
                 if source_key in sources:
                     continue
-                sources[source_key] = self.__sources(*resolved)
+                sources[source_key] = self._sources(*resolved)
             logging.debug(_('Copying dependencies for package {}: {}').format(devpkg, files_to_copy))
             for f in files_to_copy:
                 dst = os.path.join(frepodevdirpath, os.path.basename(f))
@@ -1970,23 +2017,25 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                     shutil.copyfile(src, dst)
                 except Exception as e:
                     exit_with_error(e)
-        self.__log_stage(_('Making ISO repositories ...'))
-        # Creates reprepro images for binary repositories (main и dev)
+        self._log_stage(_('Making ISO repositories ...'))
+        # Creates reprepro images for binary repositories (main & dev)
         isopaths = []
-        for items in ((frepodirpath, self.__binary_include, False),
-                      (frepodevdirpath, [], True)):
-            pkgpath, includes, is_dev = items
-            iso_maker = DebianIsoRepository(tmpdirpath, is_dev)
-            path = iso_maker.create(pkgpath, includes, self.__touch_dt)
+        for items in ((frepodirpath, False),
+                      (frepodevdirpath, True)):
+            pkgpath, is_dev = items
+            includes = self._binary_include if not is_dev else []
+            print(self._apt_sign_key)
+            iso_maker = DebianIsoRepository(tmpdirpath, is_dev, self._apt_sign_key)
+            path = iso_maker.create(pkgpath, includes, self._touch_dt)
             isopaths.append(path)
         # Creates sources ISO disk
         sources_iso_tmpdir = os.path.join(tmpdirpath, '{}_src_iso'.format(self._conf.reponame))
         os.makedirs(sources_iso_tmpdir, exist_ok=True)
         sources_iso = SourceIso(sources_iso_tmpdir)
-        source_iso_path = sources_iso.create(fsrcdirpath, self.__sources_include, self.__touch_dt)
+        source_iso_path = sources_iso.create(fsrcdirpath, self._sources_include, self._touch_dt)
         # Generate hash for ISO
         isopaths.append(source_iso_path)
-        self.__generate_iso_hash_sums(isopaths)
+        self._generate_iso_hash_sums(isopaths)
 
 
 class MakePackageCacheCmd(BaseCommand):
@@ -2225,10 +2274,10 @@ class SourcesSortCmd(BaseCommand):
 
     def __init__(self, conf_path):
         super().__init__(conf_path)
-        self.__sources_list = SourcesList(self._conf)
-        self.__sources_info = {}
+        self._sources_list = SourcesList(self._conf)
+        self._sources_info = {}
         self.__build_cache = None
-        self.__sources_list.load()
+        self._sources_list.load()
         self.__build_cache_of_builded_packages()
 
     def __build_cache_of_builded_packages(self):
@@ -2245,7 +2294,7 @@ class SourcesSortCmd(BaseCommand):
 
     def __order_depends(self, ordered, unordered, source):
         ordered_info = [('', '')]
-        for dep in self.__sources_info.get(source)['deps']:
+        for dep in self._sources_info.get(source)['deps']:
             # Find source name for binary
             source_name = None
             for pkginfo in self.__build_cache.pkginfo:
@@ -2264,7 +2313,7 @@ class SourcesSortCmd(BaseCommand):
             else:
                 # Find source for resolving binary dependency
                 new_source = None
-                for key, value in self.__sources_info.items():
+                for key, value in self._sources_info.items():
                     pkgname, version = key
                     if dep in value.get('binaries'):
                         new_source = (pkgname, version)
@@ -2289,7 +2338,7 @@ class SourcesSortCmd(BaseCommand):
         rfcache = RepositoryFullCache()
         rfcache.load()
         self.__build_cache = rfcache.builded_cache
-        for pkgname, pkgversion in self.__sources_list.build_list:
+        for pkgname, pkgversion in self._sources_list.build_list:
             if len(pkgversion):
                 glob_re = '{}_{}.dsc'.format(pkgname, pkgversion)
             else:
@@ -2322,13 +2371,13 @@ class SourcesSortCmd(BaseCommand):
                                         PackageType.PACKAGE_NOT_FOUND):
                             deps_info.append(alt[0])
                             break
-            self.__sources_info[(pkgname, pkgversion)] = {
+            self._sources_info[(pkgname, pkgversion)] = {
                 'binaries': dscpackage.binaries,
                 'version': version,
                 'deps': deps_info
             }
         if verbose:
-            for package, info in self.__sources_info.items():
+            for package, info in self._sources_info.items():
                 sys.stdout.write(_('Package {}:\n').format(package))
                 for key, values in info.items():
                     sys.stdout.write('\t{}: {}\n'.format(key, values))
@@ -2336,16 +2385,16 @@ class SourcesSortCmd(BaseCommand):
         # First move all sources, that does not required any depends from building repository
         ordered = []
         ordered.append(('# Those packages does not have build-depends from those repository:\n', ''))
-        for key, info in self.__sources_info.items():
+        for key, info in self._sources_info.items():
             if not len(info['deps']):
                 ordered.append(key)
-        unordered = sorted(list(set(self.__sources_info.keys() - ordered)), key=lambda item: item[0])
+        unordered = sorted(list(set(self._sources_info.keys() - ordered)), key=lambda item: item[0])
         while True:
             if not len(unordered):
                 break
             src = unordered.pop()
             ordered, unordered = self.__order_depends(ordered, unordered, src)
-        sources_list_new = '{}.ordered'.format(self.__sources_list.path)
+        sources_list_new = '{}.ordered'.format(self._sources_list.path)
         with open(sources_list_new, mode='w') as fp:
             for item in ordered:
                 fp.write(self.__format_source(item))
@@ -2445,7 +2494,6 @@ def register_atexit_callbacks():
         except (RuntimeError, AttributeError):
             pass
 
-    import atexit
     atexit.register(remove_temp_directory_atexit_callback)
     atexit.register(chown_files_atexit_callback)
 
