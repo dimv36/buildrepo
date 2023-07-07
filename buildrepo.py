@@ -76,18 +76,18 @@ class TemporaryDirManager:
         return cls._instance
 
     def __init__(self, prefix='buildrepo', basedir=None):
-        self.__dirs = []
-        self.__prefix = prefix
-        self.__basedir = basedir
+        self._dirs = []
+        self._prefix = prefix
+        self._basedir = basedir
 
     @property
     def dirs(self):
-        return self.__dirs
+        return self._dirs
 
     def create(self):
-        directory = self.tempfile.mkdtemp(prefix=self.__prefix, dir=self.__basedir)
+        directory = self.tempfile.mkdtemp(prefix=self._prefix, dir=self._basedir)
         os.makedirs(directory, exist_ok=True)
-        self.__dirs.append(directory)
+        self._dirs.append(directory)
         return directory
 
 
@@ -128,9 +128,9 @@ class Configuration:
             exit_with_error(_('Repository version is missing in {}').format(conf_path))
         elif not self.distro:
             exit_with_error(_('Distro name is missing in {}').format(conf_path))
-        self.__base_init()
+        self._base_init()
 
-    def __base_init(self):
+    def _base_init(self):
         if self._inited:
             return
         for subdir in ['src', 'repo', 'logs', 'cache', 'chroots', 'iso', 'ospkgs']:
@@ -138,7 +138,7 @@ class Configuration:
                     os.path.join(self.root, subdir, self.distro or '', self.reponame))
         for subdir in ['chrootsinst', 'tmp']:
             setattr(self, '{}dirpath'.format(subdir), os.path.join(self.root, subdir))
-        self.__init_logger()
+        self._init_logger()
         # Initialize temporary dir manager
         TemporaryDirManager(basedir=self.tmpdirpath)
         self._inited = True
@@ -161,7 +161,7 @@ class Configuration:
                 missing.append(val)
         return missing
 
-    def __init_logger(self):
+    def _init_logger(self):
         if os.path.exists(self.logsdirpath):
             logname = os.path.join(self.root, 'build-{}.log'.format(self.reponame))
             logging.basicConfig(level=logging.DEBUG,
@@ -192,15 +192,15 @@ class ChrootDistributionInfo(dict):
     CHROOT_BUILDER_DEFAULT = 'builder'
 
     def __init__(self):
-        self.__parse_conf()
+        self._parse_conf()
 
-    def __to_list(self, arg):
+    def _to_list(self, arg):
         if isinstance(arg, list):
             return arg
         elif isinstance(arg, str):
             return [a.strip() for a in arg.split(',')]
 
-    def __parse_mirrors(self, mirrors):
+    def _parse_mirrors(self, mirrors):
         good_mirrors = []
         # Check mirrors
         for mirror in mirrors:
@@ -216,7 +216,7 @@ class ChrootDistributionInfo(dict):
                     logging.warning(_('Mirror with schema {} does not supported').format(schema))
         return good_mirrors
 
-    def __parse_conf(self):
+    def _parse_conf(self):
         conf = Configuration.instance()
         items = {}
         mirrors = []
@@ -229,11 +229,11 @@ class ChrootDistributionInfo(dict):
                     chroot_script = os.path.abspath(chroot_script)
                 items[opt_name] = chroot_script
             elif opt_name in ('components', 'debs'):
-                val = self.__to_list(conf.parser.get('chroot', opt_name, fallback=[]))
+                val = self._to_list(conf.parser.get('chroot', opt_name, fallback=[]))
                 items[opt_name] = val
             elif opt_name in ('build-user', 'distro', 'init-scripts-dir'):
                 items[opt_name] = conf.parser.get('chroot', opt_name, fallback=None)
-        mirrors = self.__parse_mirrors(mirrors)
+        mirrors = self._parse_mirrors(mirrors)
         if len(mirrors):
             items['mirrors'] = mirrors
             if not items.get('build-user'):
@@ -261,54 +261,54 @@ class NSPContainer:
             return super().write(data.encode('utf-8', errors='ignore'))
 
     def __init__(self, overlay=False):
-        self.__conf = Configuration.instance()
-        self.__bind_directories = None
-        self.__dist_info = ChrootDistributionInfo()
-        self._name = self.__dist_info.get('distro')
-        self.__overlaydirs = {}
+        self._conf = Configuration.instance()
+        self._bind_directories = None
+        self._dist_info = ChrootDistributionInfo()
+        self._name = self._dist_info.get('distro')
+        self._overlaydirs = {}
 
     def __del__(self):
-        if not self.__overlaydirs:
+        if not self._overlaydirs:
             return
-        cmdargs = [shutil.which('umount'), self.__overlaydirs.get('rootdir')]
+        cmdargs = [shutil.which('umount'), self._overlaydirs.get('rootdir')]
         self._exec_command_log(cmdargs)
-        for key, dirname in self.__overlaydirs.items():
+        for key, dirname in self._overlaydirs.items():
             if os.path.exists(dirname):
                 shutil.rmtree(dirname)
 
     def _init_overlay(self, overlay):
         if not overlay:
             return
-        self.__overlaydirs = {'updir': '{}_up'.format(self.deploypath),
-                              'workdir': '{}_workdir'.format(self.deploypath),
-                              'rootdir': '{}_rootdir'.format(self.deploypath)}
-        for key, dirname in self.__overlaydirs.items():
+        self._overlaydirs = {'updir': '{}_up'.format(self.deploypath),
+                             'workdir': '{}_workdir'.format(self.deploypath),
+                             'rootdir': '{}_rootdir'.format(self.deploypath)}
+        for key, dirname in self._overlaydirs.items():
             os.makedirs(dirname, exist_ok=True)
         cmdargs = [shutil.which('modprobe'), 'overlay']
         self._exec_command_log(cmdargs)
-        if not os.path.ismount(self.__overlaydirs.get('rootdir')):
+        if not os.path.ismount(self._overlaydirs.get('rootdir')):
             cmdargs = [shutil.which('mount'), '-t', 'overlay', 'overlay',
                        '-o', 'lowerdir={},upperdir={},workdir={}'.format(self.deploypath,
-                                                                         self.__overlaydirs.get('updir'),
-                                                                         self.__overlaydirs.get('workdir')),
-                       self.__overlaydirs.get('rootdir')]
+                                                                         self._overlaydirs.get('updir'),
+                                                                         self._overlaydirs.get('workdir')),
+                       self._overlaydirs.get('rootdir')]
             self._exec_command_log(cmdargs)
 
     @property
     def bind_directories(self):
-        if not self.__bind_directories:
+        if not self._bind_directories:
             # Our build repository
-            bind_directories = {self.__conf.repodirpath: ('/srv/repo', 'rw'),
-                                self.__conf.ospkgsdirpath: ('/srv/ospkgs', 'rw')}
+            bind_directories = {self._conf.repodirpath: ('/srv/repo', 'rw'),
+                                self._conf.ospkgsdirpath: ('/srv/ospkgs', 'rw')}
             mirror_num = self._FIRST_MIRROR
-            for mirror in self.__dist_info.get('mirrors'):
+            for mirror in self._dist_info.get('mirrors'):
                 if mirror.startswith('file://'):
                     src = mirror[7:]
                     dst = os.path.join('/srv', 'mirrors', 'mirror{}'.format(mirror_num))
                     bind_directories[src] = (dst, 'ro')
                     mirror_num += 1
-            self.__bind_directories = bind_directories
-        return self.__bind_directories
+            self._bind_directories = bind_directories
+        return self._bind_directories
 
     def _exec_command_log(self, cmdargs, log_file=None, recreate_log=False):
         def tail(fp, n):
@@ -365,7 +365,7 @@ class NSPContainer:
         nspawn_bin = shutil.which('systemd-nspawn')
         if not nspawn_bin:
             exit_with_error(_('systemd-nspawn does not found'))
-        container_path = self.__overlaydirs.get('rootdir') or container_path
+        container_path = self._overlaydirs.get('rootdir') or container_path
         nspawn_args = [nspawn_bin, '-D', container_path,
                        '-E', 'LC_ALL=C']
         for src, dstinfo in self.bind_directories.items():
@@ -376,7 +376,7 @@ class NSPContainer:
                 nspawn_args.append('--bind={}:{}'.format(src, dst))
             else:
                 logging.error(_('Incorrect bind mode: {}').format(mode))
-        init_scripts_dir = self.__dist_info.get('init-scripts-dir')
+        init_scripts_dir = self._dist_info.get('init-scripts-dir')
         if init_scripts_dir:
             absdir = os.path.abspath(init_scripts_dir)
             if not os.path.exists(absdir) or not os.path.isdir(absdir):
@@ -388,16 +388,16 @@ class NSPContainer:
 
     @property
     def chroot_path(self):
-        return os.path.join(self.__conf.chrootsdirpath, '{}.tar.{}'.format(
+        return os.path.join(self._conf.chrootsdirpath, '{}.tar.{}'.format(
             self._name, self.CHROOT_COMPRESSION))
 
     @property
     def hostname(self):
-        return '{}_{}'.format(self.__conf.reponame, self._name)
+        return '{}_{}'.format(self._conf.reponame, self._name)
 
     @property
     def deploypath(self):
-        return os.path.join(self.__conf.chrootsinstdirpath,
+        return os.path.join(self._conf.chrootsinstdirpath,
                             self.hostname)
 
     def exists(self):
@@ -422,7 +422,7 @@ class NSPContainer:
         if self.deployed():
             return
         logging.info(_('Deploying {} to {} ...').format(self._name, self.deploypath))
-        with change_directory(self.__conf.chrootsinstdirpath):
+        with change_directory(self._conf.chrootsinstdirpath):
             try:
                 with self.tarfile.open(self.chroot_path,
                                        mode='r:{}'.format(self.CHROOT_COMPRESSION)) as tf:
@@ -445,10 +445,10 @@ class NSPContainer:
         # Generate package's log file
         m = re.match(r'.*/(?P<name>.*)_(?P<version>.*)\.dsc', dsc_file_path)
         pname, pversion = m.group('name'), m.group('version')
-        log_file = os.path.join(self.__conf.logsdirpath, '{}_{}.log'.format(pname, pversion))
+        log_file = os.path.join(self._conf.logsdirpath, '{}_{}.log'.format(pname, pversion))
         # Generate args for package building
         logging.info(_('Package building {}-{} ...'.format(pname, pversion)))
-        chroot_helper_path = os.path.join('/srv', os.path.basename(self.__conf.chroot_helper))
+        chroot_helper_path = os.path.join('/srv', os.path.basename(self._conf.chroot_helper))
         returncode = self._exec_nspawn(['--chdir=/srv', chroot_helper_path, 'build', dsc_file_path],
                                        self.deploypath, log_file, recreate_log=True)
         if returncode:
@@ -465,7 +465,7 @@ class NSPContainer:
             if not m:
                 logging.warning(_('Incorrect bind item: {}').format(directory))
                 continue
-            self.__bind_directories[m.group('target')] = (m.group('dest'), 'rw')
+            self._bind_directories[m.group('target')] = (m.group('dest'), 'rw')
         nspawn_args = ['/bin/bash']
         returncode = self._exec_nspawn(nspawn_args, self.deploypath, log_file=None)
         logging.info(_('Container {} finished with exit code {}').format(self.name, returncode))
@@ -474,7 +474,7 @@ class NSPContainer:
         self.deploy()
         ctype = PackageType.cache_type_refreshed_map().get(ctype)
         repo_path = '/srv/ospkgs' if ctype == PackageType.PACKAGE_FROM_OS_NB_REPO else '/srv/repo'
-        chroot_helper_path = os.path.join('/srv', os.path.basename(self.__conf.chroot_helper))
+        chroot_helper_path = os.path.join('/srv', os.path.basename(self._conf.chroot_helper))
         returncode = self._exec_nspawn(['--chdir=/srv', chroot_helper_path, 'refresh', repo_path],
                                        self.deploypath, log_file=None)
         logging.info(_('Refreshing packages finished with exit code {}').format(returncode))
@@ -493,19 +493,19 @@ class NSPContainer:
             if not debootstrap_bin:
                 exit_with_error(_('Failed to find debootrap'))
             # We suppose, that OS can be bootstraped from first mirror
-            mirrors = self.__dist_info.get('mirrors')
-            components = self.__dist_info.get('components', self.DEFAULT_DIST_COMPONENTS)
+            mirrors = self._dist_info.get('mirrors')
+            components = self._dist_info.get('components', self.DEFAULT_DIST_COMPONENTS)
             debootstrap_args = [debootstrap_bin,
                                 '--no-check-gpg', '--verbose', '--variant=minbase',
                                 '--components={}'.format(','.join(components)),
                                 self._name, dist_chroot_dir,
                                 mirrors[0]]
-            chroot_script = self.__dist_info.get('chroot-script')
+            chroot_script = self._dist_info.get('chroot-script')
             if chroot_script:
                 debootstrap_args.append(chroot_script)
             # Bootstrap log
-            logpath = os.path.join(os.path.dirname(self.__conf.logsdirpath),
-                                   'chroot-{}-{}.log'.format(self.name, self.__conf.reponame))
+            logpath = os.path.join(os.path.dirname(self._conf.logsdirpath),
+                                   'chroot-{}-{}.log'.format(self.name, self._conf.reponame))
             returncode = self._exec_command_log(debootstrap_args, logpath, recreate_log=True)
             if returncode:
                 raise RuntimeError(_('Debootstrap failed: {}').format(returncode))
@@ -554,10 +554,10 @@ class NSPContainer:
             # Copy chroot helper to container
             dst = os.path.join(dist_chroot_dir, 'srv', 'chroot-helper.sh')
             logging.info(_('Copying chroot helper script ...'))
-            shutil.copy(self.__conf.chroot_helper, dst)
+            shutil.copy(self._conf.chroot_helper, dst)
             os.chmod(dst, 0o755)
             # Creates builder
-            build_user = self.__dist_info.get('build-user')
+            build_user = self._dist_info.get('build-user')
             logging.info(_('Creating user {} in chroot {} ...').format(build_user, self.name))
             returncode = self._exec_nspawn(['/usr/sbin/adduser', build_user,
                                             '--disabled-password', '--gecos', 'chroot-builder'],
@@ -579,7 +579,7 @@ class NSPContainer:
                                            dist_chroot_dir, logpath)
             if returncode:
                 raise RuntimeError(_('Required packages installation in chroot failed'))
-            user_selected_packages = self.__dist_info.get('debs', [])
+            user_selected_packages = self._dist_info.get('debs', [])
             if len(user_selected_packages):
                 logging.info(_('Installing user defined packages {} in chroot {} ...').format(
                     ', '.join(user_selected_packages), self._name))
@@ -592,7 +592,7 @@ class NSPContainer:
                 os.remove(os.path.join(dist_chroot_dir, 'etc', 'securetty'))
             except Exception:
                 pass
-            root_paswd_hash = self.__conf.parser.get('chroot', 'root-pwd-hash', fallback=None)
+            root_paswd_hash = self._conf.parser.get('chroot', 'root-pwd-hash', fallback=None)
             if root_paswd_hash:
                 # Set root hash password
                 try:
@@ -617,7 +617,7 @@ class NSPContainer:
                                        mode='w:{}'.format(self.CHROOT_COMPRESSION)) as tf:
                     tf.add(self.name, filter=chroot_exclude_filter)
                 # Move to chroot storage
-                dst = os.path.join(self.__conf.chrootsdirpath, '{}.tar.{}'.format(self.name, self.CHROOT_COMPRESSION))
+                dst = os.path.join(self._conf.chrootsdirpath, '{}.tar.{}'.format(self.name, self.CHROOT_COMPRESSION))
                 logging.info(_('Moving chroot to {} ...').format(dst))
                 shutil.move(compressed_tar_path, dst)
         except Exception as e:
@@ -691,26 +691,26 @@ class DependencyFinder:
      DF_ITEM_DEPSTR) = range(4)
 
     def __init__(self, rfcache):
-        self.__deps = []
-        self.__rfcache = rfcache
-        self.__conf = Configuration.instance()
-        self.__exclude_rules = None
-        self.__black_list = None
-        self.__flags = self.FLAG_FINDER_MAIN
-        self.__seendeps = []
+        self._deps = []
+        self._rfcache = rfcache
+        self._conf = Configuration.instance()
+        self._exclude_rules = None
+        self._black_list = None
+        self._flags = self.FLAG_FINDER_MAIN
+        self._seendeps = []
 
     def process(self, pkgname, exclude_rules=None,
                 black_list=None, flags=FLAG_FINDER_MAIN):
-        self.__deps.clear()
-        self.__exclude_rules = exclude_rules
-        self.__black_list = black_list
-        self.__flags = flags
-        pkg_deps_info = self.__find_dep(pkgname)
-        self.__recurse_deps(pkg_deps_info)
-        return self.__deps
+        self._deps.clear()
+        self._exclude_rules = exclude_rules
+        self._black_list = black_list
+        self._flags = flags
+        pkg_deps_info = self._find_dep(pkgname)
+        self._recurse_deps(pkg_deps_info)
+        return self._deps
 
-    def __exec_exclude_filter(self, binaries, filter_list, func=None):
-        if not (self.__flags & DependencyFinder.FLAG_FINDER_MAIN) or filter_list is None:
+    def _exec_exclude_filter(self, binaries, filter_list, func=None):
+        if not (self._flags & DependencyFinder.FLAG_FINDER_MAIN) or filter_list is None:
             return binaries
         processed = []
         for binary in binaries:
@@ -724,7 +724,7 @@ class DependencyFinder:
                 processed.append(binary)
         return processed
 
-    def __best_dependency_resolved(self, deps_map):
+    def _best_dependency_resolved(self, deps_map):
         best = None
         rdep = None
         for dep, resinfo in deps_map.items():
@@ -737,33 +737,33 @@ class DependencyFinder:
                     rdep, best = dep, resinfo
         return rdep, best
 
-    def __append_dep_if_not_present(self, dep):
+    def _append_dep_if_not_present(self, dep):
         assert (len(dep) == 4), (dep, len(dep))
         *unused, resolved, depstr = dep
-        res = list(filter(lambda e: e[self.DF_RESOLVED] == resolved, self.__deps))
+        res = list(filter(lambda e: e[self.DF_RESOLVED] == resolved, self._deps))
         if not res:
-            self.__deps.append(dep)
+            self._deps.append(dep)
             return True
         return False
 
-    def __recurse_deps(self, p):
+    def _recurse_deps(self, p):
         required_by = form_dependency(p)
-        dest, *unused, deps, binaries = self.__rfcache.find_dependencies(p, required_by)
+        dest, *unused, deps, binaries = self._rfcache.find_dependencies(p, required_by)
         if dest in (PackageType.PACKAGE_BUILDED, PackageType.PACKAGE_FROM_OS_NB_REPO):
             assert binaries is not None, 'binaries not found'
-            if self.__flags & DependencyFinder.FLAG_FINDER_MAIN:
+            if self._flags & DependencyFinder.FLAG_FINDER_MAIN:
                 # Exclude filters: dev, dbg, etc. should be on 2nd disk
-                filtered_binaries = self.__exec_exclude_filter(binaries,
-                                                               self.__exclude_rules,
-                                                               func=lambda x, y: x.endswith(y))
+                filtered_binaries = self._exec_exclude_filter(binaries,
+                                                              self._exclude_rules,
+                                                              func=lambda x, y: x.endswith(y))
                 # Black list
-                filtered_binaries = self.__exec_exclude_filter(filtered_binaries,
-                                                               self.__black_list,
-                                                               func=lambda x, y: x == y)
+                filtered_binaries = self._exec_exclude_filter(filtered_binaries,
+                                                              self._black_list,
+                                                              func=lambda x, y: x == y)
                 for binary in filtered_binaries:
                     dependency = [binary]
                     seen_item = (binary, form_dependency(p))
-                    if seen_item not in self.__seendeps:
+                    if seen_item not in self._seendeps:
                         logging.debug(_('Adding dependency {} as builded from the same source ...').format(
                             dependency))
                         deps.append(dependency)
@@ -772,54 +772,54 @@ class DependencyFinder:
                 dep, = dep
                 dep = tuple(dep)
                 seen_item = (dep, required_by,)
-                if seen_item in self.__seendeps:
+                if seen_item in self._seendeps:
                     continue
-                depdest, pdstinfo, resolved, *unused = self.__rfcache.find_dependencies(*seen_item)
-                self.__seendeps.append(seen_item)
+                depdest, pdstinfo, resolved, *unused = self._rfcache.find_dependencies(*seen_item)
+                self._seendeps.append(seen_item)
                 if depdest == PackageType.PACKAGE_NOT_FOUND:
                     i = (depdest, pdstinfo, resolved, required_by)
-                    self.__append_dep_if_not_present(i)
+                    self._append_dep_if_not_present(i)
                 else:
                     item = (depdest, pdstinfo, resolved, required_by)
-                    appended = self.__append_dep_if_not_present(item)
-                    if appended and not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
-                        self.__recurse_deps(dep)
+                    appended = self._append_dep_if_not_present(item)
+                    if appended and not self._flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
+                        self._recurse_deps(dep)
             else:
                 # Alternative dependency?
                 deps_map = {}
                 for dpitem in dep:
                     dpitem = tuple(dpitem)
                     seen_item = (dpitem, required_by,)
-                    if seen_item in self.__seendeps:
+                    if seen_item in self._seendeps:
                         item, unused = seen_item
                         continue
-                    depdest, pdstinfo, resolved, *unused = self.__rfcache.find_dependencies(*seen_item)
+                    depdest, pdstinfo, resolved, *unused = self._rfcache.find_dependencies(*seen_item)
                     if dpitem not in deps_map:
                         deps_map[dpitem] = (depdest, pdstinfo, resolved, required_by)
                 if not deps_map:
                     return
                 # Find the best for us
-                subdep, alt_resolved = self.__best_dependency_resolved(deps_map)
+                subdep, alt_resolved = self._best_dependency_resolved(deps_map)
                 altdepstr = ' | '.join(form_dependency(d) for d in dep)
                 logging.debug(_('Alternative dependency {} resolved by {}').format(altdepstr, form_dependency(subdep)))
                 depstate, *unused = alt_resolved
-                if self.__flags & DependencyFinder.FLAG_FINDER_MAIN and depstate == PackageType.PACKAGE_NOT_FOUND:
+                if self._flags & DependencyFinder.FLAG_FINDER_MAIN and depstate == PackageType.PACKAGE_NOT_FOUND:
                     depstr = ' | '.join(form_dependency(d) for d in dep)
                     # Can't resolve alternative dependency, got the last
                     last_alt_dep = tuple(dep[-1])
                     item = (depdest, last_alt_dep, resolved, required_by)
                     logging.warning(_('Runtime dependency resolving {} failed for {}').format(
                                     depstr, form_dependency(p)))
-                    appended = self.__append_dep_if_not_present(item)
-                    if appended and not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
-                        self.__recurse_deps(last_alt_dep)
+                    appended = self._append_dep_if_not_present(item)
+                    if appended and not self._flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
+                        self._recurse_deps(last_alt_dep)
                 # Ok, add to deplist and recurse itself
                 elif not depstate == PackageType.PACKAGE_NOT_FOUND:
-                    appended = self.__append_dep_if_not_present(alt_resolved)
-                    if not self.__flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
-                        self.__recurse_deps(subdep)
+                    appended = self._append_dep_if_not_present(alt_resolved)
+                    if not self._flags & DependencyFinder.FLAG_FINDER_FIRST_LEVEL:
+                        self._recurse_deps(subdep)
 
-    def __find_dep(self, pkgname):
+    def _find_dep(self, pkgname):
         def sortversions(versions):
             for i in range(1, len(versions)):
                 item_to_insert = versions[i]
@@ -830,8 +830,8 @@ class DependencyFinder:
                 versions[j + 1] = item_to_insert
             return versions
 
-        pkg_glob_re = os.path.join(self.__conf.repodirpath, '{}_*.deb'.format(pkgname))
-        pkg_glob_ospkgs_re = os.path.join(self.__conf.ospkgsdirpath, '{}_*.deb'.format(pkgname))
+        pkg_glob_re = os.path.join(self._conf.repodirpath, '{}_*.deb'.format(pkgname))
+        pkg_glob_ospkgs_re = os.path.join(self._conf.ospkgsdirpath, '{}_*.deb'.format(pkgname))
         packages = glob.glob(pkg_glob_re) or glob.glob(pkg_glob_ospkgs_re)
         versions = []
         for p in packages:
@@ -848,26 +848,26 @@ class DependencyFinder:
                 len(packages), pkgname, ', '.join(versions)))
             version = versions[0]
             logging.warning(_('Will be processed {} = {}').format(pkgname, version))
-            pkg_glob_re = os.path.join(self.__conf.repodirpath, '{}_{}_*.deb'.format(pkgname, version))
+            pkg_glob_re = os.path.join(self._conf.repodirpath, '{}_{}_*.deb'.format(pkgname, version))
         else:
             version = versions[0]
         pkg = (pkgname, version, '=')
         depstr = form_dependency(pkg)
-        pkgdest, *unused = self.__rfcache.find_dependencies(pkg, depstr)
+        pkgdest, *unused = self._rfcache.find_dependencies(pkg, depstr)
         depitem = (pkgdest,              # Destination
                    pkg,                  # Package's info
                    (pkgname, version),   # Resolving information
                    depstr)               # Dependency as string
-        self.__deps.append(depitem)
+        self._deps.append(depitem)
         return pkg
 
 
 class _BaseIsoReposisory:
     def __init__(self, tmpdir):
         self._conf = Configuration.instance()
-        self.__tmpdir = tmpdir
-        self.__xorrisofs_bin = shutil.which('xorrisofs')
-        if not self.__xorrisofs_bin:
+        self._tmpdir = tmpdir
+        self._xorrisofs_bin = shutil.which('xorrisofs')
+        if not self._xorrisofs_bin:
             exit_with_error(_('Failed to find {} binary').format('xorrisofs'))
 
     @staticmethod
@@ -884,7 +884,7 @@ class _BaseIsoReposisory:
 
     @property
     def repodir(self):
-        return os.path.join(self.__tmpdir, self._subdir())
+        return os.path.join(self._tmpdir, self._subdir())
 
     def create(self, *args, **kwargs):
         raise NotImplementedError()
@@ -914,7 +914,7 @@ class _BaseIsoReposisory:
             logging.info(_('Building {} {} for {} ...').format(self._iso_type(), isopath, target))
             # Hook for creation time
             self._touch_at(touch_dt)
-            if not self._run_command_log([self.__xorrisofs_bin, '-r', '-J', '-joliet-long',
+            if not self._run_command_log([self._xorrisofs_bin, '-r', '-J', '-joliet-long',
                                           '-V', label, '-o', isopath, self.repodir]):
                 exit_with_error(_('Failed to create ISO image'))
 
@@ -1083,36 +1083,36 @@ class RepositoryCache:
     FLAG_DEPS = 1 << 1
 
     def __init__(self, conf, name, ctype, packages=[]):
-        self.__conf = conf
+        self._conf = conf
         self._name = name
-        self.__ctype = ctype
-        if self.__ctype not in (PackageType.PACKAGE_FROM_OS_REPO,
-                                PackageType.PACKAGE_FROM_OS_DEV_REPO):
-            self.__cache_path = os.path.join(self.__conf.cachedirpath,
-                                             '{}.cache'.format(self._name))
+        self._ctype = ctype
+        if self._ctype not in (PackageType.PACKAGE_FROM_OS_REPO,
+                               PackageType.PACKAGE_FROM_OS_DEV_REPO):
+            self._cache_path = os.path.join(self._conf.cachedirpath,
+                                            '{}.cache'.format(self._name))
         else:
-            cache_path = os.path.join(self.__conf.cachedirpath, '..', '{}.cache'.format(self._name))
-            self.__cache_path = os.path.abspath(cache_path)
+            cache_path = os.path.join(self._conf.cachedirpath, '..', '{}.cache'.format(self._name))
+            self._cache_path = os.path.abspath(cache_path)
         self._packages = packages
 
     def __repr__(self):
         return '{classname}: {name} ({type})'.format(classname=self.__class__.__name__,
                                                      name=self._name,
-                                                     type=self.__ctype)
+                                                     type=self._ctype)
 
     def __len__(self):
         return len(self._packages)
 
     def __lt__(self, other):
-        return self.__ctype < other.__ctype
+        return self._ctype < other._ctype
 
     @property
     def cache_path(self):
-        return self.__cache_path
+        return self._cache_path
 
     @property
     def ctype(self):
-        return self.__ctype
+        return self._ctype
 
     @property
     def name(self):
@@ -1132,7 +1132,7 @@ class RepositoryCache:
         def process_line_buffer(line_buffer):
             pkginfo = {}
             keys = ['Package', 'Version', 'Pre-Depends', 'Depends', 'Provides']
-            is_builded = self.__ctype == PackageType.PACKAGE_BUILDED
+            is_builded = self._ctype == PackageType.PACKAGE_BUILDED
             if is_builded:
                 keys.append('Source')
             for line in line_buffer:
@@ -1204,9 +1204,9 @@ class RepositoryCache:
                         line_buffer.clear()
                 idx_line += 1
         self._packages = packages
-        with open(self.__cache_path, mode='w') as out:
+        with open(self._cache_path, mode='w') as out:
             cache_obj = {'name': self._name,
-                         'ctype': self.__ctype,
+                         'ctype': self._ctype,
                          'packages': self._packages}
             out.write(self.json.dumps(cache_obj, sort_keys=True, indent=4))
         return len(self)
@@ -1236,15 +1236,15 @@ class RepositoryCache:
             exit_with_error(_('Missing packages in {}').format(cache_path))
         return RepositoryCache(conf, name, ctype, packages)
 
-    def __check_dep(self, pkgver, depop, depver):
+    def _check_dep(self, pkgver, depop, depver):
         return (apt_pkg.check_dep(pkgver, depop, depver) or pkgver == depver)
 
-    def __process_virtual_dependency(self, vdep):
+    def _process_virtual_dependency(self, vdep):
         vpkgname, vdepver, vdepop = vdep
         for pkginfo in self._packages:
             pkgname, pkgver = pkginfo.get('package'), pkginfo.get('version', '')
             if pkgname == vpkgname:
-                if self.__check_dep(pkgver, vdepver, vdepop):
+                if self._check_dep(pkgver, vdepver, vdepop):
                     deptuple = (pkginfo.get('real_package'),
                                 pkginfo.get('real_version'),
                                 '=')
@@ -1270,11 +1270,11 @@ class RepositoryCache:
                     vdep = (pkgname,
                             pkginfo.get('op', ''),
                             pkginfo.get('version', ''))
-                    return self.__process_virtual_dependency(vdep)
+                    return self._process_virtual_dependency(vdep)
                 # NB: Correct package version (epoch hack)
                 pkgver = fix_debian_version(pkgver)
                 depver = fix_debian_version(pkgver)
-                if self.__check_dep(pkgver, depop, depver):
+                if self._check_dep(pkgver, depop, depver):
                     source = pkginfo.get('source') or pkgname
                     if source:
                         binaries = self.binaries_for_source(source, pkginfo.get('version'))
@@ -1311,18 +1311,18 @@ class RepositoryCache:
 
 class RepositoryFullCache:
     def __init__(self):
-        self.__conf = Configuration.instance()
-        self.__result_cache = {}
-        self.__caches = []
+        self._conf = Configuration.instance()
+        self._result_cache = {}
+        self._caches = []
 
     def load(self):
-        cache_paths = [*glob.glob(os.path.join(self.__conf.root, 'cache', self.__conf.distro, '*.cache')),
-                       *glob.glob(os.path.join(self.__conf.cachedirpath, '*.cache'))]
+        cache_paths = [*glob.glob(os.path.join(self._conf.root, 'cache', self._conf.distro, '*.cache')),
+                       *glob.glob(os.path.join(self._conf.cachedirpath, '*.cache'))]
         for cache_path in cache_paths:
-            self.__caches.append(RepositoryCache.load(self.__conf, cache_path))
-        self.__caches = sorted(self.__caches)
+            self._caches.append(RepositoryCache.load(self._conf, cache_path))
+        self._caches = sorted(self._caches)
         # Валидация
-        if len(self.__caches) <= 1:
+        if len(self._caches) <= 1:
             exit_with_error(_('Caches for OS and OS-DEV repositories are required'))
         for repo, repo_type in (('OS', PackageType.PACKAGE_FROM_OS_REPO),
                                 ('OS-DEV', PackageType.PACKAGE_FROM_OS_DEV_REPO)):
@@ -1331,7 +1331,7 @@ class RepositoryFullCache:
                 logging.warning(_('Found {} {} repos').format(len(caches), repo))
 
     def _cache_by_type(self, ctype):
-        return [c for c in self.__caches if c.ctype == ctype]
+        return [c for c in self._caches if c.ctype == ctype]
 
     @property
     def builded_cache(self):
@@ -1346,9 +1346,9 @@ class RepositoryFullCache:
         item = None
         logging.debug(_('Finding dependency {} required by {} ...'.format(depstr, required_by)))
         # Try to find in cache
-        if dep in self.__result_cache:
-            return self.__result_cache.get(dep)
-        for c in self.__caches:
+        if dep in self._result_cache:
+            return self._result_cache.get(dep)
+        for c in self._caches:
             depinfo = c.find_dependency(dep)
             if depinfo is not None:
                 resolved, deps, binaries = depinfo
@@ -1360,7 +1360,7 @@ class RepositoryFullCache:
             logging.debug(_('Dependency {} NOT FOUND').format(depstr))
             item = PackageType.PACKAGE_NOT_FOUND, depstr, None, required_by, None
         # Result caching
-        self.__result_cache[dep] = item
+        self._result_cache[dep] = item
         return item
 
 
@@ -1369,11 +1369,11 @@ class SourcesList:
      SL_PKGVERSION) = range(2)
 
     def __init__(self, conf):
-        self.__conf = conf
-        self.__build_list = []
-        sources_list_path = self.__conf.parser.get(BuildCmd.cmd, 'source-list', fallback=None)
+        self._conf = conf
+        self._build_list = []
+        sources_list_path = self._conf.parser.get(BuildCmd.cmd, 'source-list', fallback=None)
         if not sources_list_path:
-            exit_with_error(_('Source list does not specified in {}').format(self.__conf.conf_path))
+            exit_with_error(_('Source list does not specified in {}').format(self._conf.conf_path))
         sources_list_path = os.path.abspath(sources_list_path)
         if not os.path.exists(sources_list_path):
             exit_with_error(_('File {} does not exists').format(sources_list_path))
@@ -1388,19 +1388,19 @@ class SourcesList:
                     continue
                 tokens = line.split(' ')
                 if len(tokens) == 1:
-                    self.__build_list.append((line, ''))
+                    self._build_list.append((line, ''))
                 elif len(tokens) == 2:
-                    self.__build_list.append((tokens[self.SL_PKGNAME], tokens[self.SL_PKGVERSION]))
+                    self._build_list.append((tokens[self.SL_PKGNAME], tokens[self.SL_PKGVERSION]))
                 else:
                     logging.warning(_('Mailformed line {} in {}').format(line, self._sources_list_path))
                     continue
-        if not len(self.__build_list):
+        if not len(self._build_list):
             logging.warning(_('No one sources are found in {}').format(self._sources_list_path))
             exit(0)
 
     @property
     def build_list(self):
-        return self.__build_list
+        return self._build_list
 
     @property
     def path(self):
@@ -1412,7 +1412,7 @@ class SourcesList:
         return '\n'.join(indent + p[self.SL_PKGNAME]
                          if not len(p[self.SL_PKGVERSION]) else
                          indent + '{} = {}'.format(p[self.SL_PKGNAME], p[self.SL_PKGVERSION])
-                         for p in self.__build_list)
+                         for p in self._build_list)
 
 
 class BaseCommand:
@@ -1433,14 +1433,14 @@ class BaseCommand:
         self._conf = Configuration(conf_path)
         if self.root_required and not os.getuid() == 0:
             exit_with_error(_('Must be run as superuser'))
-        self.__check_required_binaries()
+        self._check_required_binaries()
         if not self.cmd == 'init' and not self._conf.directories_created():
             for missing in self._conf.missing_directories:
                 logging.error(_('Directory {} does not created').format(missing))
             exit_with_error(_('Required directories is not created. '
                               'Please, run `{} init` first.').format(sys.argv[0]))
 
-    def __check_required_binaries(self):
+    def _check_required_binaries(self):
         missing_binaries = []
         for binary in self.required_binaries:
             if shutil.which(binary) is None:
@@ -1461,12 +1461,12 @@ class _RepoAnalyzerCmd(BaseCommand):
         super().__init__(conf_path)
         self._caches = []
         self._rfcache = RepositoryFullCache()
-        self.__build_local_caches()
+        self._build_local_caches()
         self._rfcache.load()
         self._depfinder = DependencyFinder(self._rfcache)
         self._builded_cache = self._rfcache.builded_cache
 
-    def __build_local_caches(self):
+    def _build_local_caches(self):
         logging.info(_('Building local caches ...'))
         maker = MakePackageCacheCmd(self._conf.conf_path)
         maker.run(mount_path=self._conf.repodirpath,
@@ -1652,7 +1652,7 @@ class BuildCmd(BaseCommand):
             traceback.print_exc()
             exit_with_error(_('Failed to get binaries for {}').format(package))
 
-    def __make_build(self, jobs, rebuild):
+    def _make_build(self, jobs, rebuild):
         logging.info(_('Following packages are found in build list: \n{}').format(self._sources_list.build_list_str))
         dist_chroot = NSPContainer()
         dist_chroot.deploy()
@@ -1694,7 +1694,7 @@ class BuildCmd(BaseCommand):
                                   'because options --rebuild-all specified').format(', '.join(rebuild)))
             rebuild = [p for p, v in self._sources_list.build_list]
             logging.warning(_('Will be rebuilded following packages: {}').format(self._sources_list.build_list_str))
-        self.__make_build(jobs, rebuild)
+        self._make_build(jobs, rebuild)
 
 
 class MakeRepoCmd(_RepoAnalyzerCmd):
@@ -2276,11 +2276,11 @@ class SourcesSortCmd(BaseCommand):
         super().__init__(conf_path)
         self._sources_list = SourcesList(self._conf)
         self._sources_info = {}
-        self.__build_cache = None
+        self._build_cache = None
         self._sources_list.load()
-        self.__build_cache_of_builded_packages()
+        self._build_cache_of_builded_packages()
 
-    def __build_cache_of_builded_packages(self):
+    def _build_cache_of_builded_packages(self):
         logging.info(_('Building cache for builded packages ...'))
         maker = MakePackageCacheCmd(self._conf.conf_path)
         maker.run(mount_path=self._conf.repodirpath,
@@ -2288,16 +2288,16 @@ class SourcesSortCmd(BaseCommand):
                   ctype=PackageType.PACKAGE_BUILDED,
                   info_message=False)
 
-    def __format_source(self, source):
+    def _format_source(self, source):
         source_name, source_version = source
         return '{} {}'.format(source_name, source_version) if len(source_version) else source_name
 
-    def __order_depends(self, ordered, unordered, source):
+    def _order_depends(self, ordered, unordered, source):
         ordered_info = [('', '')]
         for dep in self._sources_info.get(source)['deps']:
             # Find source name for binary
             source_name = None
-            for pkginfo in self.__build_cache.pkginfo:
+            for pkginfo in self._build_cache.pkginfo:
                 pkgname = pkginfo.get('package')
                 if dep == pkgname:
                     source_name = pkginfo.get('source', pkgname)
@@ -2307,7 +2307,7 @@ class SourcesSortCmd(BaseCommand):
             in_ordered = source_name in [p[SourcesList.SL_PKGNAME] for p in ordered]
             if in_ordered:
                 item = ('# {} (dep: {}) is needed for {}'.format(source_name, dep,
-                                                                 self.__format_source(source)), '')
+                                                                 self._format_source(source)), '')
                 if item not in ordered_info:
                     ordered_info.append(item)
             else:
@@ -2321,11 +2321,11 @@ class SourcesSortCmd(BaseCommand):
                 # Removing source from unordered array and retry
                 try:
                     item = ('# {} (dep: {}) is needed for {}'.format(new_source[0], dep,
-                                                                     self.__format_source(source)), '')
+                                                                     self._format_source(source)), '')
                     if item not in ordered_info:
                         ordered_info.append(item)
                     unordered.remove(new_source)
-                    ordered, unordered = self.__order_depends(ordered, unordered, new_source)
+                    ordered, unordered = self._order_depends(ordered, unordered, new_source)
                 except ValueError:
                     pass
         if source not in ordered_info:
@@ -2337,7 +2337,7 @@ class SourcesSortCmd(BaseCommand):
     def run(self, verbose=False):
         rfcache = RepositoryFullCache()
         rfcache.load()
-        self.__build_cache = rfcache.builded_cache
+        self._build_cache = rfcache.builded_cache
         for pkgname, pkgversion in self._sources_list.build_list:
             if len(pkgversion):
                 glob_re = '{}_{}.dsc'.format(pkgname, pkgversion)
@@ -2348,7 +2348,7 @@ class SourcesSortCmd(BaseCommand):
             if not len(source):
                 exit_with_error(_('Could not find source by regexp {}').format(glob_re))
             source = source[0]
-            source_name = self.__format_source((pkgname, pkgversion))
+            source_name = self._format_source((pkgname, pkgversion))
             logging.info(_('Processing source {} ...').format(source_name))
             dscpackage = apt.debfile.DscSrcPackage(filename=source)
             m = re.match(r'.*_(?P<version>.*)\.dsc', source)
@@ -2393,11 +2393,11 @@ class SourcesSortCmd(BaseCommand):
             if not len(unordered):
                 break
             src = unordered.pop()
-            ordered, unordered = self.__order_depends(ordered, unordered, src)
+            ordered, unordered = self._order_depends(ordered, unordered, src)
         sources_list_new = '{}.ordered'.format(self._sources_list.path)
         with open(sources_list_new, mode='w') as fp:
             for item in ordered:
-                fp.write(self.__format_source(item))
+                fp.write(self._format_source(item))
                 fp.write('\n')
         logging.info(_('Ordered sources list is saved to {}').format(sources_list_new))
 
