@@ -30,7 +30,7 @@ if not sys.version_info >= (3, 5,):
 _ = gettext.gettext
 
 # Script version
-__version__ = '1.6.3'
+__version__ = '1.7.0'
 
 # Disable warnings
 warnings.filterwarnings('ignore')
@@ -216,6 +216,26 @@ class ChrootDistributionInfo(dict):
                     logging.warning(_('Mirror with schema {} does not supported').format(schema))
         return good_mirrors
 
+    def _parse_bind_opts(self, opt, value):
+        bind = {}
+        if not value:
+            return bind
+        try:
+            for pair in value.split(','):
+                pair = pair.strip()
+                if not pair:
+                    continue
+                host_path, container_path = pair.split(':')
+                host_path = os.path.abspath(host_path)
+                if not os.path.exists(host_path):
+                    logging.warning(_('\'{}\' - no such path, skipped').format(host_path))
+                    continue
+                else:
+                    bind = {**bind, host_path: container_path}
+        except ValueError:
+            logging.warning(_('Bad option \'{}\' value \'{}\'').format(opt, value))
+        return bind
+
     def _parse_conf(self):
         conf = Configuration.instance()
         items = {}
@@ -227,17 +247,19 @@ class ChrootDistributionInfo(dict):
                 chroot_script = conf.parser.get('chroot', opt_name, fallback=None)
                 if chroot_script:
                     chroot_script = os.path.abspath(chroot_script)
-                items[opt_name] = chroot_script
+                items = {**items, opt_name: chroot_script}
             elif opt_name in ('components', 'debs'):
                 val = self._to_list(conf.parser.get('chroot', opt_name, fallback=[]))
-                items[opt_name] = val
+                items = {**items, opt_name: val}
             elif opt_name in ('build-user', 'distro', 'init-scripts-dir'):
-                items[opt_name] = conf.parser.get('chroot', opt_name, fallback=None)
+                items = {**items, opt_name: conf.parser.get('chroot', opt_name, fallback=None)}
+            elif opt_name in ('bind-ro', 'bind'):
+                items = {**items, opt_name: self._parse_bind_opts(opt_name, conf.parser.get('chroot', opt_name))}
         mirrors = self._parse_mirrors(mirrors)
-        if len(mirrors):
-            items['mirrors'] = mirrors
+        if mirrors:
+            items = {**items, 'mirrors': mirrors}
             if not items.get('build-user'):
-                items['build-user'] = self.CHROOT_BUILDER_DEFAULT
+                items = {**items, 'build-user': self.CHROOT_BUILDER_DEFAULT}
             self.update(items)
         else:
             exit_with_error(_('No one mirror is present'))
@@ -250,7 +272,7 @@ class NSPContainer:
     _FIRST_MIRROR = 0
     DEFAULT_DIST_COMPONENTS = ['main', 'contrib', 'non-free']
     DEFAULT_USER_PACKAGES = []
-    CHROOT_REQUIRED_DEBS = ['dpkg-dev', 'fakeroot', 'quilt', 'sudo', 'mount', 'gpg2']
+    CHROOT_REQUIRED_DEBS = ['dpkg-dev', 'fakeroot', 'quilt', 'sudo', 'mount']
     CHROOT_COMPRESSION = 'xz'
 
     class BuildLogger(io.FileIO):
@@ -262,7 +284,7 @@ class NSPContainer:
 
     def __init__(self, overlay=False):
         self._conf = Configuration.instance()
-        self._bind_directories = None
+        self._bind_opts = None
         self._dist_info = ChrootDistributionInfo()
         self._name = self._dist_info.get('distro')
         self._overlaydirs = {}
@@ -295,20 +317,25 @@ class NSPContainer:
             self._exec_command_log(cmdargs)
 
     @property
-    def bind_directories(self):
-        if not self._bind_directories:
+    def bind_opts(self):
+        if not self._bind_opts:
             # Our build repository
-            bind_directories = {self._conf.repodirpath: ('/srv/repo', 'rw'),
-                                self._conf.ospkgsdirpath: ('/srv/ospkgs', 'rw')}
+            bind_opts = {self._conf.repodirpath: ('/srv/repo', 'rw'),
+                         self._conf.ospkgsdirpath: ('/srv/ospkgs', 'rw'),
+                         self._conf.chroot_helper: ('/srv/chroot-helper.sh', 'rw')}
             mirror_num = self._FIRST_MIRROR
             for mirror in self._dist_info.get('mirrors'):
                 if mirror.startswith('file://'):
                     src = mirror[7:]
                     dst = os.path.join('/srv', 'mirrors', 'mirror{}'.format(mirror_num))
-                    bind_directories[src] = (dst, 'ro')
+                    bind_opts = {**bind_opts, src: (dst, 'ro')}
                     mirror_num += 1
-            self._bind_directories = bind_directories
-        return self._bind_directories
+            extra_bind_ro_opts = {host_path: (dest_path, 'ro')
+                                  for host_path, dest_path in self._dist_info.get('bind-ro', {}).items()}
+            extra_bind_rw_opts = {host_path: (dest_path, 'rw')
+                                  for host_path, dest_path in self._dist_info.get('bind', {}).items()}
+            self._bind_opts = {**bind_opts, **extra_bind_ro_opts, **extra_bind_rw_opts}
+        return self._bind_opts
 
     def _exec_command_log(self, cmdargs, log_file=None, recreate_log=False):
         def tail(fp, n):
@@ -368,7 +395,7 @@ class NSPContainer:
         container_path = self._overlaydirs.get('rootdir') or container_path
         nspawn_args = [nspawn_bin, '-D', container_path,
                        '-E', 'LC_ALL=C']
-        for src, dstinfo in self.bind_directories.items():
+        for src, dstinfo in self.bind_opts.items():
             dst, mode = dstinfo
             if mode == 'ro':
                 nspawn_args.append('--bind-ro={}:{}'.format(src, dst))
@@ -449,23 +476,16 @@ class NSPContainer:
         # Generate args for package building
         logging.info(_('Package building {}-{} ...'.format(pname, pversion)))
         chroot_helper_path = os.path.join('/srv', os.path.basename(self._conf.chroot_helper))
-        returncode = self._exec_nspawn(['--chdir=/srv', chroot_helper_path, 'build', dsc_file_path],
+        returncode = self._exec_nspawn(['--chdir=/srv', '/bin/bash', chroot_helper_path, 'build', dsc_file_path],
                                        self.deploypath, log_file, recreate_log=True)
         if returncode:
             raise RuntimeError(_('Package building {} failed').format(pname))
         else:
             logging.info(_('Package {} successfully builded').format(pname))
 
-    def login(self, bind=[], overlay=False):
+    def login(self, overlay=False):
         # Init overlay
         self._init_overlay(overlay)
-        self.bind_directories
-        for directory in bind:
-            m = re.match(r'(?P<target>.*):(?P<dest>.*)', directory)
-            if not m:
-                logging.warning(_('Incorrect bind item: {}').format(directory))
-                continue
-            self._bind_directories[m.group('target')] = (m.group('dest'), 'rw')
         nspawn_args = ['/bin/bash']
         returncode = self._exec_nspawn(nspawn_args, self.deploypath, log_file=None)
         logging.info(_('Container {} finished with exit code {}').format(self.name, returncode))
@@ -475,9 +495,26 @@ class NSPContainer:
         ctype = PackageType.cache_type_refreshed_map().get(ctype)
         repo_path = '/srv/ospkgs' if ctype == PackageType.PACKAGE_FROM_OS_NB_REPO else '/srv/repo'
         chroot_helper_path = os.path.join('/srv', os.path.basename(self._conf.chroot_helper))
-        returncode = self._exec_nspawn(['--chdir=/srv', chroot_helper_path, 'refresh', repo_path],
+        returncode = self._exec_nspawn(['--chdir=/srv', '/bin/bash', chroot_helper_path, 'refresh', repo_path],
                                        self.deploypath, log_file=None)
         logging.info(_('Refreshing packages finished with exit code {}').format(returncode))
+
+    def bind(self, file, mode='rw'):
+        self.bind_opts
+        self._bind_opts = {**self._bind_opts, file: (os.path.join('/srv', os.path.join(file)), mode)}
+
+    def run_script(self, script, *args, log_file=None):
+        script_bind_info = self.bind_opts.get(script, None)
+        if not script_bind_info:
+            exit_with_error(_('Script \'{}\' not binded to container \'{}\'').format(script, self._name))
+        mnt, mode = script_bind_info
+        self.deploy()
+        returncode = self._exec_nspawn(['--chdir=/srv', '/bin/bash', mnt, *args],
+                                       self.deploypath, log_file=log_file)
+        if returncode:
+            exit_with_error(_('Script \'{}\' with args: \'{}\' finished with code {}').format(script,
+                                                                                              ' '.join(args),
+                                                                                              returncode))
 
     def create(self):
         def chroot_exclude_filter(tarinfo):
@@ -551,11 +588,6 @@ class NSPContainer:
             chroot_etc_hostname = os.path.join(dist_chroot_dir, 'etc', 'hostname')
             with open(chroot_etc_hostname, mode='w') as hostname_conf:
                 hostname_conf.write(self.name)
-            # Copy chroot helper to container
-            dst = os.path.join(dist_chroot_dir, 'srv', 'chroot-helper.sh')
-            logging.info(_('Copying chroot helper script ...'))
-            shutil.copy(self._conf.chroot_helper, dst)
-            os.chmod(dst, 0o755)
             # Creates builder
             build_user = self._dist_info.get('build-user')
             logging.info(_('Creating user {} in chroot {} ...').format(build_user, self.name))
@@ -1044,7 +1076,9 @@ class SourceIso(_BaseIsoReposisory):
         # Create buildrepo.conf, used for those repository
         source_buildrepo_path = os.path.join(self.repodir, os.path.basename(self._conf.conf_path))
         with open(source_buildrepo_path, mode='w') as sfp, open(self._conf.conf_path, mode='r') as fp:
-            keys_re = r'^(?P<key>build-root|mirror\d+|root-pwd-hash|debs|creation-timestamp)\s*='
+            keys = ['build-root', 'root-pwd-hash', 'debs', 'creation-timestamp',
+                    'bind', 'bind-ro', 'apt-sign-repo', 'apt-gpg-key', 'reprepro-pre-hook']
+            keys_re = '^(?P<key>mirror\\d+|{})\\s*='.format('|'.join(keys))
             hashsums_re = r'^\[hashsums\]\s*'
             hashsums_section = False
             for line in fp.readlines():
@@ -1052,7 +1086,9 @@ class SourceIso(_BaseIsoReposisory):
                 hashsums_m = re.match(hashsums_re, line)
                 m = re.match(keys_re, line)
                 if m or hashsums_section:
-                    if m:
+                    if m and m.group('key') == 'apt-sign-repo':
+                        sfp.write('# {} = off\n'.format(m.group('key')))
+                    elif m:
                         sfp.write('# {} =\n'.format(m.group('key')))
                     else:
                         kvmatch = re.match(r'(?P<key>.*)\s*=\s*(?P<value>.*)', line)
@@ -1569,18 +1605,6 @@ class RepoInitializerCmd(BaseCommand):
         logging.info(_('Successfully inited'))
 
 
-class _ChrootCommand(BaseCommand):
-    def __init__(self, conf_path):
-        super().__init__(conf_path)
-        self._dist_chroot = NSPContainer()
-        self._refresh_packages()
-
-    def _refresh_packages(self):
-        for typname, ctype in PackageType.cache_type_refreshed_map().items():
-            logging.info(_('Refreshing Packages cache in repo {} ...').format(typname))
-            self._dist_chroot.refresh_repo(ctype)
-
-
 class BuildCmd(BaseCommand):
     cmd = 'build'
     cmdhelp = _('Builds packages from source list into distro chroot')
@@ -1710,6 +1734,14 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
         self._sources_include = self._parse_includes('source-include')
         self._binary_include = self._parse_includes('binary-include')
         self._gpg2bin = shutil.which('gpg2')
+        self._reprepro_pre_hook = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'reprepro-pre-hook', fallback=None)
+        if self._reprepro_pre_hook:
+            self._reprepro_pre_hook = os.path.abspath(self._reprepro_pre_hook)
+            if not os.path.exists(self._reprepro_pre_hook) or not os.path.isfile(self._reprepro_pre_hook):
+                exit_with_error(_('reprepro-pre-hook: \'{}\' - no such file').format(self._reprepro_pre_hook))
+            logging.info(_('Using reprepro-pre-hook at \'{}\'').format(self._reprepro_pre_hook))
+            if not os.getuid() == 0:
+                exit_with_error(_('Using reprepro-pre-hook requires superuser'))
         self._packages = {}
         # white list
         white_list = self._conf.parser.get(_RepoAnalyzerCmd.alias, 'white-list', fallback=None)
@@ -2017,6 +2049,16 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                     shutil.copyfile(src, dst)
                 except Exception as e:
                     exit_with_error(e)
+        if self._reprepro_pre_hook:
+            self._log_stage(_('Running reprepro-pre-hook ...'))
+            nsconainer = NSPContainer(overlay=True)
+            for repotype, subdir in (('main', frepodirpath), ('dev', frepodevdirpath)):
+                nsconainer.bind(subdir)
+                logging.info(_('Running \'{}\' on \'{}\' ...').format(self._reprepro_pre_hook, subdir))
+                nsconainer.run_script(self._reprepro_pre_hook,
+                                      subdir,
+                                      log_file=os.path.join(self._conf.logsdirpath,
+                                                            'reprepro-pre-hook-{}.log'.format(repotype)))
         self._log_stage(_('Making ISO repositories ...'))
         # Creates reprepro images for binary repositories (main & dev)
         isopaths = []
@@ -2024,7 +2066,6 @@ class MakeRepoCmd(_RepoAnalyzerCmd):
                       (frepodevdirpath, True)):
             pkgpath, is_dev = items
             includes = self._binary_include if not is_dev else []
-            print(self._apt_sign_key)
             iso_maker = DebianIsoRepository(tmpdirpath, is_dev, self._apt_sign_key)
             path = iso_maker.create(pkgpath, includes, self._touch_dt)
             isopaths.append(path)
@@ -2244,14 +2285,12 @@ class ChrootLoginCmd(BaseCommand):
         ('--deploy', {'required': False, 'action': 'store_true', 'default': False,
                       'help': _('Deploy container instance if not exists, default: False')}),
         ('--overlay', {'required': False, 'action': 'store_true', 'default': False,
-                       'help': _('Deploy container with overlay option, default: %(default)s')}),
-        ('--bind', {'required': False, 'nargs': '+', 'default': [],
-                    'help': _('Additionally mounted directories for chroot (in systemd-nspawn format)')}),
+                       'help': _('Deploy container with overlay option, default: %(default)s')})
     )
     root_required = True
     required_binaries = ['systemd-nspawn']
 
-    def run(self, deploy, bind, overlay):
+    def run(self, deploy, overlay):
         nsconainer = NSPContainer()
         if overlay:
             logging.warning(_('Running container {} with overlay').format(nsconainer.name))
@@ -2261,9 +2300,7 @@ class ChrootLoginCmd(BaseCommand):
             else:
                 exit_with_error(_('Could not login to container {}: does not deployed').format(nsconainer.name))
         try:
-            # Form bind arg for binding src directory
-            bind.append('{}:/srv/src'.format(self._conf.srcdirpath))
-            nsconainer.login(bind, overlay=overlay)
+            nsconainer.login(overlay=overlay)
         except Exception as e:
             exit_with_error(e)
 
