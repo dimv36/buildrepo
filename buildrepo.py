@@ -322,6 +322,7 @@ class NSPContainer:
             # Our build repository
             bind_opts = {self._conf.repodirpath: ('/srv/repo', 'rw'),
                          self._conf.ospkgsdirpath: ('/srv/ospkgs', 'rw'),
+                         self._conf.srcdirpath: ('/srv/src', 'rw'),
                          self._conf.chroot_helper: ('/srv/chroot-helper.sh', 'rw')}
             mirror_num = self._FIRST_MIRROR
             for mirror in self._dist_info.get('mirrors'):
@@ -403,6 +404,11 @@ class NSPContainer:
                 nspawn_args.append('--bind={}:{}'.format(src, dst))
             else:
                 logging.error(_('Incorrect bind mode: {}').format(mode))
+        for key, value in os.environ.items():
+            if key.startswith('BUILDREPO_'):
+                key = key.replace('BUILDREPO_', '')
+                if key:
+                    nspawn_args += ['-E', '{}={}'.format(key, value)]
         init_scripts_dir = self._dist_info.get('init-scripts-dir')
         if init_scripts_dir:
             absdir = os.path.abspath(init_scripts_dir)
