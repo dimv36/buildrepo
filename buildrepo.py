@@ -30,7 +30,7 @@ if not sys.version_info >= (3, 5,):
 _ = gettext.gettext
 
 # Script version
-__version__ = '1.7.0'
+__version__ = '1.7.1'
 
 # Disable warnings
 warnings.filterwarnings('ignore')
@@ -272,7 +272,7 @@ class NSPContainer:
     _FIRST_MIRROR = 0
     DEFAULT_DIST_COMPONENTS = ['main', 'contrib', 'non-free']
     DEFAULT_USER_PACKAGES = []
-    CHROOT_REQUIRED_DEBS = ['dpkg-dev', 'fakeroot', 'quilt', 'sudo', 'mount']
+    CHROOT_REQUIRED_DEBS = ['dpkg-dev', 'fakeroot', 'quilt', 'sudo', 'mount', 'adduser']
     CHROOT_COMPRESSION = 'xz'
 
     class BuildLogger(io.FileIO):
@@ -538,8 +538,10 @@ class NSPContainer:
             # We suppose, that OS can be bootstraped from first mirror
             mirrors = self._dist_info.get('mirrors')
             components = self._dist_info.get('components', self.DEFAULT_DIST_COMPONENTS)
+            include_debs = [*self.CHROOT_REQUIRED_DEBS, *self._dist_info.get('debs', [])]
             debootstrap_args = [debootstrap_bin,
                                 '--no-check-gpg', '--verbose', '--variant=minbase',
+                                '--include={}'.format(','.join(include_debs)),
                                 '--components={}'.format(','.join(components)),
                                 self._name, dist_chroot_dir,
                                 mirrors[0]]
@@ -612,19 +614,6 @@ class NSPContainer:
                                            dist_chroot_dir, logpath)
             if returncode:
                 raise RuntimeError(_('APT cache update failed'))
-            logging.info(_('Installing required packages in chroot {} ...').format(self.name))
-            returncode = self._exec_nspawn(['apt-get', 'install'] + self.CHROOT_REQUIRED_DEBS,
-                                           dist_chroot_dir, logpath)
-            if returncode:
-                raise RuntimeError(_('Required packages installation in chroot failed'))
-            user_selected_packages = self._dist_info.get('debs', [])
-            if len(user_selected_packages):
-                logging.info(_('Installing user defined packages {} in chroot {} ...').format(
-                    ', '.join(user_selected_packages), self._name))
-                returncode = self._exec_nspawn(['apt-get', 'install'] + user_selected_packages,
-                                               dist_chroot_dir, logpath)
-                if returncode:
-                    raise RuntimeError(_('User selected packages installation in chroot failed'))
             try:
                 # Removing /etc/securetty for login to chroot via `--boot`
                 os.remove(os.path.join(dist_chroot_dir, 'etc', 'securetty'))
